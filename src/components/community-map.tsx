@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ComposableMap, Geographies, Geography, Marker } from "react-simple-maps";
+import { toPng } from "html-to-image";
 import { publicClient, connectWallet, getWalletClient, getInjected, ensureChain } from "@/lib/wallet";
-import { RITUAL_MAP_ABI, RITUAL_MAP_ADDRESS, REGIONS } from "@/lib/ritual-contract";
+import { RITUAL_MAP_ABI, RITUAL_MAP_ADDRESS } from "@/lib/ritual-contract";
+import { COUNTRIES, getCountry } from "@/lib/countries";
 import logo from "@/assets/ritual-logo.png";
 
 const GEO_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
@@ -13,14 +15,22 @@ export type Member = {
   timestamp: number;
 };
 
+type SuccessInfo = {
+  handle: string;
+  region: string;
+  rank: number;
+  total: number;
+  address: `0x${string}`;
+};
+
 function regionCoords(id: string): [number, number] {
-  return REGIONS.find((r) => r.id === id)?.coords ?? [0, 0];
+  return getCountry(id)?.coords ?? [0, 0];
 }
 function jitter(seed: string): [number, number] {
   let h = 0;
   for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
-  const a = ((h & 0xffff) / 0xffff - 0.5) * 18;
-  const b = (((h >> 16) & 0xffff) / 0xffff - 0.5) * 12;
+  const a = ((h & 0xffff) / 0xffff - 0.5) * 6;
+  const b = (((h >> 16) & 0xffff) / 0xffff - 0.5) * 4;
   return [a, b];
 }
 function avatarUrl(handle: string) {
@@ -33,18 +43,20 @@ export function CommunityMap() {
   const [loading, setLoading] = useState(true);
   const [account, setAccount] = useState<`0x${string}` | null>(null);
   const [handle, setHandle] = useState("");
-  const [region, setRegion] = useState(REGIONS[0].id);
+  const [region, setRegion] = useState("us");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string>("");
   const [hovered, setHovered] = useState<Member | null>(null);
   const [tick, setTick] = useState(0);
+  const [success, setSuccess] = useState<SuccessInfo | null>(null);
+  const [banner, setBanner] = useState<string | null>(null);
 
   useEffect(() => {
     const i = setInterval(() => setTick((t) => t + 1), 700);
     return () => clearInterval(i);
   }, []);
 
-  async function refresh() {
+  async function refresh(): Promise<Member[]> {
     try {
       const res = (await publicClient.readContract({
         address: RITUAL_MAP_ADDRESS,
@@ -59,8 +71,10 @@ export function CommunityMap() {
         timestamp: Number(ts[i]),
       }));
       setMembers(list);
+      return list;
     } catch (e) {
       console.error(e);
+      return [];
     } finally {
       setLoading(false);
     }
@@ -99,6 +113,7 @@ export function CommunityMap() {
   async function onJoin() {
     setStatus("");
     if (!handle.trim()) return setStatus("Enter your X handle");
+    if (!getCountry(region)) return setStatus("Select a country");
     let acct = account;
     if (!acct) {
       try {
@@ -121,8 +136,22 @@ export function CommunityMap() {
       });
       setStatus("Transmitting → " + hash.slice(0, 10) + "…");
       await publicClient.waitForTransactionReceipt({ hash });
+      const list = await refresh();
+      // Find this user's record (latest entry matching address)
+      const mine = [...list].reverse().find((m) => m.address.toLowerCase() === acct!.toLowerCase());
+      const inRegion = list.filter((m) => m.region === region);
+      const rank = mine ? inRegion.findIndex((m) => m.address.toLowerCase() === mine.address.toLowerCase()) + 1 : inRegion.length;
+      const total = inRegion.length;
+      setSuccess({
+        handle: handle.replace(/^@/, "").trim(),
+        region,
+        rank: Math.max(rank, 1),
+        total: Math.max(total, 1),
+        address: acct!,
+      });
+      setBanner(`tx confirmed · ${hash.slice(0, 10)}…`);
       setStatus("Joined the lattice.");
-      await refresh();
+      setTimeout(() => setBanner(null), 6000);
     } catch (e: any) {
       setStatus(e?.shortMessage ?? e?.message ?? "Failed");
     } finally {
@@ -132,7 +161,6 @@ export function CommunityMap() {
 
   const counts = useMemo(() => {
     const m = new Map<string, number>();
-    for (const r of REGIONS) m.set(r.id, 0);
     for (const u of members) m.set(u.region, (m.get(u.region) ?? 0) + 1);
     return m;
   }, [members]);
@@ -150,6 +178,7 @@ export function CommunityMap() {
   return (
     <div className="scanlines relative min-h-screen">
       <Topbar account={account} onConnect={onConnect} count={members.length} />
+      {banner && <SuccessBanner text={banner} onClose={() => setBanner(null)} />}
       <main className="relative mx-auto max-w-[1500px] px-4 pb-20 pt-6 lg:px-8">
         <Hero />
         <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_360px]">
@@ -172,13 +201,31 @@ export function CommunityMap() {
         <Marquee count={members.length} loading={loading} members={members} />
       </main>
       <Footer />
+      {success && <ShareCardModal info={success} onClose={() => setSuccess(null)} />}
+    </div>
+  );
+}
+
+function SuccessBanner({ text, onClose }: { text: string; onClose: () => void }) {
+  return (
+    <div className="sticky top-[57px] z-40 border-y border-[var(--ritual-green)] bg-[color-mix(in_oklab,var(--ritual-green)_22%,black)] backdrop-blur-md">
+      <div className="mx-auto flex max-w-[1500px] items-center justify-between px-4 py-2 lg:px-8">
+        <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.3em] text-foreground">
+          <span className="size-1.5 animate-pulse rounded-full bg-[var(--ritual-green-bright)]" />
+          <span className="font-bold text-[var(--ritual-green-bright)]">// transaction confirmed</span>
+          <span className="hidden text-muted-foreground sm:inline">{text}</span>
+        </div>
+        <button onClick={onClose} className="text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground">
+          dismiss ✕
+        </button>
+      </div>
     </div>
   );
 }
 
 function Topbar({ account, onConnect, count }: { account: string | null; onConnect: () => void; count: number }) {
   return (
-    <header className="sticky top-0 z-30 border-b border-border bg-background/70 backdrop-blur-md">
+    <header className="sticky top-0 z-50 border-b border-border bg-background/70 backdrop-blur-md">
       <div className="mx-auto flex max-w-[1500px] items-center justify-between px-4 py-3 lg:px-8">
         <div className="flex items-center gap-3">
           <img src={logo} alt="Ritual" className="h-9 w-9 rounded-sm flicker" />
@@ -299,7 +346,9 @@ function MapPanel({
               />
               <div className="text-xs">
                 <div className="font-bold text-foreground">@{hovered.handle}</div>
-                <div className="text-muted-foreground">{REGIONS.find((r) => r.id === hovered.region)?.name}</div>
+                <div className="text-muted-foreground">
+                  {getCountry(hovered.region)?.flag} {getCountry(hovered.region)?.name ?? hovered.region}
+                </div>
                 <a
                   href={`https://explorer.ritualfoundation.org/address/${hovered.address}`}
                   target="_blank"
@@ -313,6 +362,77 @@ function MapPanel({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function CountryCombobox({ region, setRegion }: { region: string; setRegion: (s: string) => void }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const selected = getCountry(region);
+
+  useEffect(() => {
+    function onDoc(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
+
+  const q = query.trim().toLowerCase();
+  const matches = q
+    ? COUNTRIES.filter((c) => c.name.toLowerCase().includes(q) || c.code.includes(q)).slice(0, 60)
+    : COUNTRIES.slice(0, 60);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="mt-1 flex w-full items-center justify-between rounded-sm border border-border bg-background/70 px-3 py-2.5 text-left text-sm text-foreground outline-none focus:border-[var(--ritual-green)]"
+      >
+        <span className="flex items-center gap-2">
+          <span className="text-base">{selected?.flag ?? "🏳️"}</span>
+          <span>{selected?.name ?? "Select country"}</span>
+        </span>
+        <span className="text-muted-foreground">▾</span>
+      </button>
+      {open && (
+        <div className="absolute left-0 right-0 z-30 mt-1 rounded-sm border border-[var(--ritual-green)] bg-background/95 backdrop-blur-md shadow-2xl">
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="search country…"
+            className="w-full border-b border-border bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground/60"
+          />
+          <ul className="max-h-64 overflow-y-auto">
+            {matches.length === 0 && (
+              <li className="px-3 py-3 text-xs text-muted-foreground">no matches</li>
+            )}
+            {matches.map((c) => (
+              <li key={c.code}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRegion(c.code);
+                    setOpen(false);
+                    setQuery("");
+                  }}
+                  className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[color-mix(in_oklab,var(--ritual-green)_18%,transparent)] ${
+                    region === c.code ? "bg-[color-mix(in_oklab,var(--ritual-green)_12%,transparent)] text-foreground" : "text-foreground/90"
+                  }`}
+                >
+                  <span className="text-base">{c.flag}</span>
+                  <span className="flex-1">{c.name}</span>
+                  <span className="text-[10px] uppercase tracking-widest text-muted-foreground">{c.code}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
@@ -365,18 +485,8 @@ function JoinCard({
         )}
       </div>
 
-      <label className="mt-4 block text-[11px] uppercase tracking-widest text-muted-foreground">Region</label>
-      <select
-        value={region}
-        onChange={(e) => setRegion(e.target.value)}
-        className="mt-1 w-full rounded-sm border border-border bg-background/70 px-3 py-2.5 text-sm text-foreground outline-none focus:border-[var(--ritual-green)]"
-      >
-        {REGIONS.map((r) => (
-          <option key={r.id} value={r.id}>
-            {r.name}
-          </option>
-        ))}
-      </select>
+      <label className="mt-4 block text-[11px] uppercase tracking-widest text-muted-foreground">Country</label>
+      <CountryCombobox region={region} setRegion={setRegion} />
 
       <button
         onClick={onJoin}
@@ -413,7 +523,12 @@ function RegionList({
   setRegion: (id: string) => void;
   total: number;
 }) {
-  const max = Math.max(1, ...Array.from(counts.values()));
+  const entries = useMemo(() => {
+    return Array.from(counts.entries())
+      .filter(([code, c]) => c > 0 && getCountry(code))
+      .sort((a, b) => b[1] - a[1]);
+  }, [counts]);
+  const max = Math.max(1, ...entries.map(([, c]) => c));
   return (
     <section className="rounded-sm border border-border bg-card/60 p-5">
       <div className="flex items-baseline justify-between">
@@ -426,36 +541,43 @@ function RegionList({
           <div className="text-[10px] uppercase tracking-widest text-muted-foreground">total</div>
         </div>
       </div>
-      <ul className="mt-4 space-y-2">
-        {REGIONS.map((r) => {
-          const c = counts.get(r.id) ?? 0;
-          const pct = (c / max) * 100;
-          const isActive = r.id === active;
-          return (
-            <li key={r.id}>
-              <button
-                onClick={() => setRegion(r.id)}
-                className={`group block w-full rounded-sm border px-3 py-2 text-left transition-colors ${
-                  isActive ? "border-[var(--ritual-green)] bg-[color-mix(in_oklab,var(--ritual-green)_12%,transparent)]" : "border-transparent hover:border-border"
-                }`}
-              >
-                <div className="flex items-center justify-between text-xs">
-                  <span className={`uppercase tracking-wider ${isActive ? "text-foreground" : "text-muted-foreground group-hover:text-foreground"}`}>
-                    {r.name}
-                  </span>
-                  <span className="font-bold tabular-nums text-foreground">{c}</span>
-                </div>
-                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-background/60">
-                  <div
-                    className="h-full bg-[var(--ritual-green-bright)] transition-all duration-700"
-                    style={{ width: `${pct}%` }}
-                  />
-                </div>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
+      {entries.length === 0 ? (
+        <div className="mt-6 rounded-sm border border-dashed border-border p-4 text-center text-[11px] uppercase tracking-widest text-muted-foreground">
+          // no countries yet · be the first
+        </div>
+      ) : (
+        <ul className="mt-4 max-h-[420px] space-y-2 overflow-y-auto pr-1">
+          {entries.map(([code, c]) => {
+            const country = getCountry(code)!;
+            const pct = (c / max) * 100;
+            const isActive = code === active;
+            return (
+              <li key={code}>
+                <button
+                  onClick={() => setRegion(code)}
+                  className={`group block w-full rounded-sm border px-3 py-2 text-left transition-colors ${
+                    isActive ? "border-[var(--ritual-green)] bg-[color-mix(in_oklab,var(--ritual-green)_12%,transparent)]" : "border-transparent hover:border-border"
+                  }`}
+                >
+                  <div className="flex items-center justify-between text-xs">
+                    <span className={`flex items-center gap-2 uppercase tracking-wider ${isActive ? "text-foreground" : "text-muted-foreground group-hover:text-foreground"}`}>
+                      <span className="text-base">{country.flag}</span>
+                      {country.name}
+                    </span>
+                    <span className="font-bold tabular-nums text-foreground">{c}</span>
+                  </div>
+                  <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-background/60">
+                    <div
+                      className="h-full bg-[var(--ritual-green-bright)] transition-all duration-700"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </section>
   );
 }
@@ -487,5 +609,158 @@ function Footer() {
     <footer className="border-t border-border py-8 text-center text-[11px] uppercase tracking-[0.3em] text-muted-foreground">
       built on <a href="https://ritualfoundation.org" target="_blank" rel="noreferrer" className="text-[var(--ritual-green-bright)] hover:underline">ritual</a> · chain 1979 · testnet
     </footer>
+  );
+}
+
+function ShareCardModal({ info, onClose }: { info: SuccessInfo; onClose: () => void }) {
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [downloading, setDownloading] = useState(false);
+  const country = getCountry(info.region);
+  const shareText = `I just joined the @ritualnet community map.
+
+${country?.flag ?? ""} ${country?.name ?? info.region} · #${info.rank} of ${info.total}
+@${info.handle} pinned to the lattice ⛧
+
+ritual-community-map.lovable.app`;
+
+  async function download() {
+    if (!cardRef.current) return;
+    setDownloading(true);
+    try {
+      const dataUrl = await toPng(cardRef.current, {
+        cacheBust: true,
+        pixelRatio: 2,
+        backgroundColor: "#000000",
+      });
+      const link = document.createElement("a");
+      link.download = `ritual-${info.handle}-${info.region}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  function shareToX() {
+    const url = `https://twitter.com/intent/tweet?text=${encodeURIComponent(shareText)}`;
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm" onClick={onClose}>
+      <div className="relative w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <button
+          onClick={onClose}
+          className="absolute -top-10 right-0 text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground"
+        >
+          close ✕
+        </button>
+
+        {/* The capturable card */}
+        <div
+          ref={cardRef}
+          className="relative overflow-hidden rounded-sm border border-[var(--ritual-green)] bg-black p-6 text-white"
+          style={{ aspectRatio: "1 / 1.15" }}
+        >
+          {/* grid bg */}
+          <div
+            className="pointer-events-none absolute inset-0 opacity-40"
+            style={{
+              backgroundImage:
+                "linear-gradient(color-mix(in oklab, var(--ritual-green) 25%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in oklab, var(--ritual-green) 25%, transparent) 1px, transparent 1px)",
+              backgroundSize: "32px 32px",
+            }}
+          />
+          <div
+            className="pointer-events-none absolute -right-20 -top-20 h-64 w-64 rounded-full opacity-50 blur-3xl"
+            style={{ background: "var(--ritual-green-bright)" }}
+          />
+
+          <div className="relative flex h-full flex-col">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <img src={logo} alt="" crossOrigin="anonymous" className="h-7 w-7" />
+                <div className="leading-tight">
+                  <div className="text-[9px] uppercase tracking-[0.32em] text-white/60">Ritual</div>
+                  <div className="text-[11px] font-bold tracking-wider">COMMUNITY//MAP</div>
+                </div>
+              </div>
+              <div className="rounded-sm border border-[var(--ritual-green)] px-2 py-1 text-[9px] uppercase tracking-widest text-[var(--ritual-green-bright)]">
+                ⛧ initiated
+              </div>
+            </div>
+
+            <div className="mt-6 flex items-center gap-4">
+              <div className="relative">
+                <div className="absolute inset-0 -m-1 rounded-sm border border-[var(--ritual-green)]" />
+                <img
+                  src={avatarUrl(info.handle)}
+                  alt={info.handle}
+                  crossOrigin="anonymous"
+                  className="relative h-20 w-20 rounded-sm border border-border object-cover"
+                  onError={(e) => ((e.target as HTMLImageElement).src = "https://unavatar.io/fallback.png")}
+                />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-[0.3em] text-white/60">x handle</div>
+                <div className="truncate text-2xl font-black tracking-tight">@{info.handle}</div>
+                <div className="mt-1 flex items-center gap-1 text-sm text-white/80">
+                  <span className="text-lg">{country?.flag}</span>
+                  <span>{country?.name ?? info.region}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 grid grid-cols-2 gap-3">
+              <div className="rounded-sm border border-[color-mix(in_oklab,var(--ritual-green)_45%,transparent)] bg-white/5 p-3">
+                <div className="text-[9px] uppercase tracking-[0.3em] text-white/60">// my rank</div>
+                <div className="mt-1 text-3xl font-black tabular-nums text-[var(--ritual-green-bright)]">
+                  #{info.rank}
+                </div>
+                <div className="text-[10px] uppercase tracking-widest text-white/60">in {country?.code.toUpperCase() ?? info.region}</div>
+              </div>
+              <div className="rounded-sm border border-[color-mix(in_oklab,var(--ritual-green)_45%,transparent)] bg-white/5 p-3">
+                <div className="text-[9px] uppercase tracking-[0.3em] text-white/60">// region total</div>
+                <div className="mt-1 text-3xl font-black tabular-nums">{info.total}</div>
+                <div className="text-[10px] uppercase tracking-widest text-white/60">initiates</div>
+              </div>
+            </div>
+
+            <div className="mt-auto pt-6">
+              <div className="text-[9px] uppercase tracking-[0.3em] text-white/50">// wallet</div>
+              <div className="mt-0.5 break-all font-mono text-[10px] text-white/70">
+                {info.address}
+              </div>
+              <div className="mt-2 flex items-center justify-between text-[9px] uppercase tracking-[0.3em] text-white/40">
+                <span>chain · 1979 · ritual testnet</span>
+                <span>ritual-community-map</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <button
+            onClick={download}
+            disabled={downloading}
+            className="rounded-sm border border-border bg-card/60 px-4 py-2.5 text-[11px] font-bold uppercase tracking-widest text-foreground transition-colors hover:border-[var(--ritual-green)] disabled:opacity-60"
+          >
+            {downloading ? "rendering…" : "↓ download"}
+          </button>
+          <button
+            onClick={shareToX}
+            className="rounded-sm bg-[var(--ritual-green)] px-4 py-2.5 text-[11px] font-black uppercase tracking-widest text-primary-foreground transition-colors hover:bg-[var(--ritual-green-bright)]"
+          >
+            share to 𝕏
+          </button>
+        </div>
+        <p className="mt-3 text-center text-[10px] uppercase tracking-widest text-muted-foreground">
+          // tx confirmed · welcome to the lattice
+        </p>
+      </div>
+    </div>
   );
 }
