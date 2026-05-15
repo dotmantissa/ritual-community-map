@@ -72,14 +72,18 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
+      { title: "Ritual Community Map" },
+      { name: "description", content: "Build a community map for Ritual users, showcasing their X avatars and selected regions on a live, interactive map." },
       { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { property: "og:title", content: "Ritual Community Map" },
+      { property: "og:description", content: "Build a community map for Ritual users, showcasing their X avatars and selected regions on a live, interactive map." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
       { name: "twitter:site", content: "@Lovable" },
+      { name: "twitter:title", content: "Ritual Community Map" },
+      { name: "twitter:description", content: "Build a community map for Ritual users, showcasing their X avatars and selected regions on a live, interactive map." },
+      { property: "og:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/b951afe1-3f42-45f2-afdf-5edeab60cebd/id-preview-e0767e0b--c5bfc866-915b-47db-af95-f8cb31d1e746.lovable.app-1778859596662.png" },
+      { name: "twitter:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/b951afe1-3f42-45f2-afdf-5edeab60cebd/id-preview-e0767e0b--c5bfc866-915b-47db-af95-f8cb31d1e746.lovable.app-1778859596662.png" },
     ],
     links: [
       {
