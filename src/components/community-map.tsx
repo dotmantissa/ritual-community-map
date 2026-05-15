@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ComposableMap, Geographies, Geography } from "react-simple-maps";
-import { motion, AnimatePresence } from "motion/react";
+import { useEffect, useMemo, useState } from "react";
+import { ComposableMap, Geographies, Geography, Marker } from "react-simple-maps";
 import { publicClient, connectWallet, getWalletClient, getInjected, ensureChain } from "@/lib/wallet";
 import { RITUAL_MAP_ABI, RITUAL_MAP_ADDRESS, REGIONS } from "@/lib/ritual-contract";
 import logo from "@/assets/ritual-logo.png";
@@ -24,10 +23,9 @@ function jitter(seed: string): [number, number] {
   const b = (((h >> 16) & 0xffff) / 0xffff - 0.5) * 12;
   return [a, b];
 }
-
 function avatarUrl(handle: string) {
   const clean = handle.replace(/^@/, "").trim();
-  return `https://unavatar.io/x/${encodeURIComponent(clean)}?fallback=https://unavatar.io/${encodeURIComponent(clean)}`;
+  return `https://unavatar.io/x/${encodeURIComponent(clean)}`;
 }
 
 export function CommunityMap() {
@@ -41,9 +39,8 @@ export function CommunityMap() {
   const [hovered, setHovered] = useState<Member | null>(null);
   const [tick, setTick] = useState(0);
 
-  // Animated heartbeat tick for cursor flicker
   useEffect(() => {
-    const i = setInterval(() => setTick((t) => t + 1), 600);
+    const i = setInterval(() => setTick((t) => t + 1), 700);
     return () => clearInterval(i);
   }, []);
 
@@ -71,13 +68,22 @@ export function CommunityMap() {
 
   useEffect(() => {
     refresh();
-    const unwatch = publicClient.watchContractEvent({
-      address: RITUAL_MAP_ADDRESS,
-      abi: RITUAL_MAP_ABI,
-      eventName: "Joined",
-      onLogs: () => refresh(),
-    });
-    return () => unwatch();
+    let unwatch: (() => void) | undefined;
+    try {
+      unwatch = publicClient.watchContractEvent({
+        address: RITUAL_MAP_ADDRESS,
+        abi: RITUAL_MAP_ABI,
+        eventName: "Joined",
+        onLogs: () => refresh(),
+        poll: true,
+        pollingInterval: 4000,
+      });
+    } catch {}
+    const i = setInterval(refresh, 8000);
+    return () => {
+      unwatch?.();
+      clearInterval(i);
+    };
   }, []);
 
   async function onConnect() {
@@ -93,10 +99,11 @@ export function CommunityMap() {
   async function onJoin() {
     setStatus("");
     if (!handle.trim()) return setStatus("Enter your X handle");
-    if (!account) {
+    let acct = account;
+    if (!acct) {
       try {
-        const a = await connectWallet();
-        setAccount(a);
+        acct = await connectWallet();
+        setAccount(acct);
       } catch (e: any) {
         return setStatus(e?.message ?? "Wallet required");
       }
@@ -104,8 +111,7 @@ export function CommunityMap() {
     setBusy(true);
     try {
       await ensureChain();
-      const acct = (account ?? (getInjected() && (await getInjected().request({ method: "eth_accounts" }))[0])) as `0x${string}`;
-      const w = getWalletClient(acct);
+      const w = getWalletClient(acct!);
       setStatus("Awaiting signature…");
       const hash = await w.writeContract({
         address: RITUAL_MAP_ADDRESS,
@@ -146,13 +152,8 @@ export function CommunityMap() {
       <Topbar account={account} onConnect={onConnect} count={members.length} />
       <main className="relative mx-auto max-w-[1500px] px-4 pb-20 pt-6 lg:px-8">
         <Hero />
-        <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_340px]">
-          <MapPanel
-            members={placedMembers}
-            hovered={hovered}
-            setHovered={setHovered}
-            tick={tick}
-          />
+        <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_360px]">
+          <MapPanel members={placedMembers} hovered={hovered} setHovered={setHovered} tick={tick} loading={loading} />
           <aside className="flex flex-col gap-6">
             <JoinCard
               handle={handle}
@@ -168,7 +169,7 @@ export function CommunityMap() {
             <RegionList counts={counts} active={region} setRegion={setRegion} total={members.length} />
           </aside>
         </div>
-        <Marquee count={members.length} loading={loading} />
+        <Marquee count={members.length} loading={loading} members={members} />
       </main>
       <Footer />
     </div>
@@ -182,12 +183,12 @@ function Topbar({ account, onConnect, count }: { account: string | null; onConne
         <div className="flex items-center gap-3">
           <img src={logo} alt="Ritual" className="h-9 w-9 rounded-sm flicker" />
           <div className="leading-tight">
-            <div className="text-xs uppercase tracking-[0.32em] text-muted-foreground">Ritual</div>
+            <div className="text-[10px] uppercase tracking-[0.32em] text-muted-foreground">Ritual</div>
             <div className="text-sm font-bold tracking-wider text-foreground">COMMUNITY//MAP</div>
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <div className="hidden items-center gap-2 rounded-sm border border-border bg-card/60 px-3 py-1.5 text-xs sm:flex">
+          <div className="hidden items-center gap-2 rounded-sm border border-border bg-card/60 px-3 py-1.5 text-[11px] sm:flex">
             <span className="size-1.5 animate-pulse rounded-full bg-[var(--ritual-green-bright)]" />
             <span className="text-muted-foreground">chain</span>
             <span className="text-foreground">1979</span>
@@ -196,9 +197,9 @@ function Topbar({ account, onConnect, count }: { account: string | null; onConne
           </div>
           <button
             onClick={onConnect}
-            className="group relative overflow-hidden rounded-sm border border-[var(--ritual-green)] px-4 py-2 text-xs font-bold uppercase tracking-widest text-foreground transition-colors hover:bg-[var(--ritual-green)] hover:text-primary-foreground"
+            className="group relative overflow-hidden rounded-sm border border-[var(--ritual-green)] px-4 py-2 text-[11px] font-bold uppercase tracking-widest text-foreground transition-colors hover:bg-[var(--ritual-green)] hover:text-primary-foreground"
           >
-            <span className="relative">{account ? account.slice(0, 6) + "…" + account.slice(-4) : "Connect"}</span>
+            {account ? account.slice(0, 6) + "…" + account.slice(-4) : "Connect Wallet"}
           </button>
         </div>
       </div>
@@ -211,7 +212,7 @@ function Hero() {
     <section className="relative overflow-hidden rounded-sm border border-border bg-card/40 px-6 py-10 lg:px-10 lg:py-14">
       <div className="ritual-grid absolute inset-0 opacity-60" />
       <div className="relative">
-        <div className="text-xs uppercase tracking-[0.4em] text-[var(--ritual-green-bright)]">// the lattice is open</div>
+        <div className="text-[11px] uppercase tracking-[0.4em] text-[var(--ritual-green-bright)]">// the lattice is open</div>
         <h1
           className="glitch mt-3 text-4xl font-black uppercase leading-[0.95] tracking-tight text-foreground sm:text-6xl lg:text-7xl"
           data-text="Ritual Community Map"
@@ -232,80 +233,259 @@ function MapPanel({
   hovered,
   setHovered,
   tick,
+  loading,
 }: {
   members: (Member & { lng: number; lat: number })[];
   hovered: Member | null;
   setHovered: (m: Member | null) => void;
   tick: number;
+  loading: boolean;
 }) {
   return (
     <div className="relative overflow-hidden rounded-sm border border-border bg-card/40">
       <div className="ritual-grid absolute inset-0 opacity-40" />
       <div className="relative">
         <div className="flex items-center justify-between border-b border-border px-4 py-2 text-[11px] uppercase tracking-[0.3em] text-muted-foreground">
-          <span>// global lattice</span>
+          <span>// global lattice {loading ? "· syncing" : ""}</span>
           <span className="text-[var(--ritual-green-bright)]">{tick % 2 === 0 ? "● live" : "○ live"}</span>
         </div>
-        <ComposableMap
-          projection="geoEqualEarth"
-          projectionConfig={{ scale: 165 }}
-          width={980}
-          height={520}
-          style={{ width: "100%", height: "auto" }}
-        >
-          <Geographies geography={GEO_URL}>
-            {({ geographies }) =>
-              geographies.map((geo) => (
-                <Geography
-                  key={geo.rsmKey}
-                  geography={geo}
-                  style={{
-                    default: {
-                      fill: "color-mix(in oklab, var(--ritual-green-deep) 35%, transparent)",
-                      stroke: "color-mix(in oklab, var(--ritual-green) 60%, transparent)",
-                      strokeWidth: 0.4,
-                      outline: "none",
-                    },
-                    hover: { fill: "color-mix(in oklab, var(--ritual-green) 45%, transparent)", outline: "none" },
-                    pressed: { outline: "none" },
-                  }}
-                />
-              ))
-            }
-          </Geographies>
-          {members.map((m) => (
-            <MarkerDot key={m.address} m={m} setHovered={setHovered} />
-          ))}
-        </ComposableMap>
-        {hovered && (
-          <div className="pointer-events-none absolute left-3 top-12 flex max-w-xs items-center gap-3 rounded-sm border border-[var(--ritual-green)] bg-background/90 p-2 backdrop-blur-md">
-            <img
-              src={avatarUrl(hovered.handle)}
-              alt={hovered.handle}
-              className="h-10 w-10 rounded-sm border border-border object-cover"
-              onError={(e) => ((e.target as HTMLImageElement).style.visibility = "hidden")}
-            />
-            <div className="text-xs">
-              <div className="font-bold text-foreground">@{hovered.handle}</div>
-              <div className="text-muted-foreground">{REGIONS.find((r) => r.id === hovered.region)?.name}</div>
-              <div className="text-[10px] text-muted-foreground/70">{hovered.address.slice(0, 10)}…</div>
+        <div className="relative" onMouseLeave={() => setHovered(null)}>
+          <ComposableMap
+            projection="geoEqualEarth"
+            projectionConfig={{ scale: 175 }}
+            width={980}
+            height={520}
+            style={{ width: "100%", height: "auto" }}
+          >
+            <Geographies geography={GEO_URL}>
+              {({ geographies }: { geographies: any[] }) =>
+                geographies.map((geo: any) => (
+                  <Geography
+                    key={geo.rsmKey}
+                    geography={geo}
+                    style={{
+                      default: {
+                        fill: "color-mix(in oklab, var(--ritual-green-deep) 38%, transparent)",
+                        stroke: "color-mix(in oklab, var(--ritual-green) 60%, transparent)",
+                        strokeWidth: 0.4,
+                        outline: "none",
+                      },
+                      hover: {
+                        fill: "color-mix(in oklab, var(--ritual-green) 45%, transparent)",
+                        outline: "none",
+                      },
+                      pressed: { outline: "none" },
+                    }}
+                  />
+                ))
+              }
+            </Geographies>
+            {members.map((m) => (
+              <Marker key={m.address} coordinates={[m.lng, m.lat]}>
+                <g onMouseEnter={() => setHovered(m)} style={{ cursor: "pointer" }}>
+                  <circle r={8} fill="var(--ritual-green-bright)" opacity={0.18} className="ritual-ping" style={{ transformOrigin: "center" }} />
+                  <circle r={3.2} fill="var(--ritual-green-bright)" stroke="white" strokeWidth={0.6} />
+                </g>
+              </Marker>
+            ))}
+          </ComposableMap>
+          {hovered && (
+            <div className="pointer-events-none absolute left-3 top-3 flex max-w-xs items-center gap-3 rounded-sm border border-[var(--ritual-green)] bg-background/90 p-2 backdrop-blur-md">
+              <img
+                src={avatarUrl(hovered.handle)}
+                alt={hovered.handle}
+                className="h-10 w-10 rounded-sm border border-border object-cover"
+                onError={(e) => ((e.target as HTMLImageElement).style.visibility = "hidden")}
+              />
+              <div className="text-xs">
+                <div className="font-bold text-foreground">@{hovered.handle}</div>
+                <div className="text-muted-foreground">{REGIONS.find((r) => r.id === hovered.region)?.name}</div>
+                <a
+                  href={`https://explorer.ritualfoundation.org/address/${hovered.address}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="pointer-events-auto text-[10px] text-muted-foreground/80 hover:text-[var(--ritual-green-bright)]"
+                >
+                  {hovered.address.slice(0, 10)}…{hovered.address.slice(-6)}
+                </a>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function MarkerDot({
-  m,
-  setHovered,
+function JoinCard({
+  handle,
+  setHandle,
+  region,
+  setRegion,
+  account,
+  busy,
+  status,
+  onJoin,
+  onConnect,
 }: {
-  m: Member & { lng: number; lat: number };
-  setHovered: (m: Member | null) => void;
+  handle: string;
+  setHandle: (s: string) => void;
+  region: string;
+  setRegion: (s: string) => void;
+  account: string | null;
+  busy: boolean;
+  status: string;
+  onJoin: () => void;
+  onConnect: () => void;
 }) {
-  // We need projection inside ComposableMap; using <Marker> from react-simple-maps would be cleaner.
-  return null as any;
+  const cleanHandle = handle.replace(/^@/, "").trim();
+  return (
+    <section className="rounded-sm border border-border bg-card/60 p-5">
+      <div className="text-[11px] uppercase tracking-[0.3em] text-[var(--ritual-green-bright)]">// initiate</div>
+      <h2 className="mt-1 text-lg font-bold uppercase tracking-wider text-foreground">Join the lattice</h2>
+
+      <label className="mt-4 block text-[11px] uppercase tracking-widest text-muted-foreground">X handle</label>
+      <div className="mt-1 flex items-center rounded-sm border border-border bg-background/70 focus-within:border-[var(--ritual-green)]">
+        <span className="px-3 text-muted-foreground">@</span>
+        <input
+          value={handle}
+          onChange={(e) => setHandle(e.target.value)}
+          placeholder="vitalik"
+          className="w-full bg-transparent py-2.5 pr-3 text-sm text-foreground outline-none placeholder:text-muted-foreground/60"
+          maxLength={32}
+          spellCheck={false}
+        />
+        {cleanHandle && (
+          <img
+            src={avatarUrl(cleanHandle)}
+            onError={(e) => ((e.target as HTMLImageElement).style.visibility = "hidden")}
+            alt=""
+            className="mr-2 h-7 w-7 rounded-sm border border-border object-cover"
+          />
+        )}
+      </div>
+
+      <label className="mt-4 block text-[11px] uppercase tracking-widest text-muted-foreground">Region</label>
+      <select
+        value={region}
+        onChange={(e) => setRegion(e.target.value)}
+        className="mt-1 w-full rounded-sm border border-border bg-background/70 px-3 py-2.5 text-sm text-foreground outline-none focus:border-[var(--ritual-green)]"
+      >
+        {REGIONS.map((r) => (
+          <option key={r.id} value={r.id}>
+            {r.name}
+          </option>
+        ))}
+      </select>
+
+      <button
+        onClick={onJoin}
+        disabled={busy}
+        className="mt-5 w-full rounded-sm bg-[var(--ritual-green)] px-4 py-3 text-xs font-black uppercase tracking-[0.25em] text-primary-foreground transition-colors hover:bg-[var(--ritual-green-bright)] disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {busy ? "…signing…" : account ? "Sign & Join" : "Connect & Join"}
+      </button>
+      {!account && (
+        <button onClick={onConnect} className="mt-2 w-full text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground">
+          or connect wallet first
+        </button>
+      )}
+      {status && (
+        <div className="mt-3 break-all rounded-sm border border-border bg-background/60 p-2 text-[11px] text-muted-foreground">
+          <span className="text-[var(--ritual-green-bright)]">›</span> {status}
+        </div>
+      )}
+      <div className="mt-3 text-[10px] uppercase tracking-widest text-muted-foreground/70">
+        Need RITUAL? <a href="https://faucet.ritualfoundation.org" target="_blank" rel="noreferrer" className="text-[var(--ritual-green-bright)] underline-offset-2 hover:underline">faucet ↗</a>
+      </div>
+    </section>
+  );
 }
 
-// Replace MarkerDot with proper Marker import — re-exported approach
+function RegionList({
+  counts,
+  active,
+  setRegion,
+  total,
+}: {
+  counts: Map<string, number>;
+  active: string;
+  setRegion: (id: string) => void;
+  total: number;
+}) {
+  const max = Math.max(1, ...Array.from(counts.values()));
+  return (
+    <section className="rounded-sm border border-border bg-card/60 p-5">
+      <div className="flex items-baseline justify-between">
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.3em] text-[var(--ritual-green-bright)]">// regions</div>
+          <h2 className="mt-1 text-lg font-bold uppercase tracking-wider text-foreground">Distribution</h2>
+        </div>
+        <div className="text-right">
+          <div className="text-2xl font-black tabular-nums text-foreground">{total}</div>
+          <div className="text-[10px] uppercase tracking-widest text-muted-foreground">total</div>
+        </div>
+      </div>
+      <ul className="mt-4 space-y-2">
+        {REGIONS.map((r) => {
+          const c = counts.get(r.id) ?? 0;
+          const pct = (c / max) * 100;
+          const isActive = r.id === active;
+          return (
+            <li key={r.id}>
+              <button
+                onClick={() => setRegion(r.id)}
+                className={`group block w-full rounded-sm border px-3 py-2 text-left transition-colors ${
+                  isActive ? "border-[var(--ritual-green)] bg-[color-mix(in_oklab,var(--ritual-green)_12%,transparent)]" : "border-transparent hover:border-border"
+                }`}
+              >
+                <div className="flex items-center justify-between text-xs">
+                  <span className={`uppercase tracking-wider ${isActive ? "text-foreground" : "text-muted-foreground group-hover:text-foreground"}`}>
+                    {r.name}
+                  </span>
+                  <span className="font-bold tabular-nums text-foreground">{c}</span>
+                </div>
+                <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-background/60">
+                  <div
+                    className="h-full bg-[var(--ritual-green-bright)] transition-all duration-700"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+function Marquee({ count, loading, members }: { count: number; loading: boolean; members: Member[] }) {
+  const items = members.length
+    ? members.slice(-12).map((m) => `@${m.handle}`)
+    : ["awaiting initiates", "the lattice listens", "chain 1979", "ritual.foundation"];
+  const doubled = [...items, ...items, ...items, ...items];
+  return (
+    <div className="mt-10 overflow-hidden rounded-sm border border-border bg-card/40 py-3">
+      <div className="flex w-max gap-10 marquee-track text-[11px] uppercase tracking-[0.4em] text-muted-foreground">
+        {doubled.map((t, i) => (
+          <span key={i} className="flex items-center gap-3">
+            <span className="size-1 rounded-full bg-[var(--ritual-green-bright)]" />
+            {t}
+          </span>
+        ))}
+      </div>
+      {loading && (
+        <div className="mt-2 px-4 text-[10px] uppercase tracking-widest text-muted-foreground">…syncing chain {count > 0 ? `· ${count} loaded` : ""}</div>
+      )}
+    </div>
+  );
+}
+
+function Footer() {
+  return (
+    <footer className="border-t border-border py-8 text-center text-[11px] uppercase tracking-[0.3em] text-muted-foreground">
+      built on <a href="https://ritualfoundation.org" target="_blank" rel="noreferrer" className="text-[var(--ritual-green-bright)] hover:underline">ritual</a> · chain 1979 · testnet
+    </footer>
+  );
+}

@@ -1,26 +1,18 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { CommunityMap } from "@/components/community-map";
 
 export const Route = createFileRoute("/")({
+  head: () => ({
+    meta: [
+      { title: "Ritual Community Map — chain 1979" },
+      { name: "description", content: "Pin yourself to the Ritual lattice. Sign one transaction on Ritual testnet to add yourself to the live community map." },
+      { property: "og:title", content: "Ritual Community Map" },
+      { property: "og:description", content: "On-chain community map on Ritual testnet (chain 1979)." },
+    ],
+  }),
   component: Index,
 });
 
-// IMPORTANT: Replace this placeholder. For sites with multiple pages (About, Services, Contact, etc.),
-// create separate route files (about.tsx, services.tsx, contact.tsx) — don't put all pages in this file.
-function PlaceholderIndex() {
-  return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
-    </div>
-  );
-}
-
 function Index() {
-  return <PlaceholderIndex />;
+  return <CommunityMap />;
 }
