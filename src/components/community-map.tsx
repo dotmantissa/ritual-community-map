@@ -491,6 +491,40 @@ function CountryCombobox({ region, setRegion }: { region: string; setRegion: (s:
   );
 }
 
+function MyCard({ member, onOpenCard }: { member: Member; onOpenCard: () => void }) {
+  const country = getCountry(member.region);
+  const inRegion = member.region;
+  return (
+    <section className="rounded-sm border border-border bg-card/60 p-5">
+      <div className="text-[11px] uppercase tracking-[0.3em] text-[var(--ritual-green-bright)]">// initiated</div>
+      <h2 className="mt-1 text-lg font-bold uppercase tracking-wider text-foreground">You are in the lattice</h2>
+
+      <div className="mt-4 flex items-center gap-3">
+        <img
+          src={avatarUrl(member.handle)}
+          alt={member.handle}
+          className="h-12 w-12 rounded-sm border border-border object-cover"
+          onError={(e) => ((e.target as HTMLImageElement).style.visibility = "hidden")}
+        />
+        <div className="min-w-0">
+          <div className="truncate text-sm font-bold text-foreground">@{member.handle}</div>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="text-base">{country?.flag}</span>
+            <span>{country?.name ?? inRegion}</span>
+          </div>
+        </div>
+      </div>
+
+      <button
+        onClick={onOpenCard}
+        className="mt-5 w-full rounded-sm bg-[var(--ritual-green)] px-4 py-3 text-xs font-black uppercase tracking-[0.25em] text-primary-foreground transition-colors hover:bg-[var(--ritual-green-bright)]"
+      >
+        View My Card
+      </button>
+    </section>
+  );
+}
+
 function JoinCard({
   handle,
   setHandle,
