@@ -234,17 +234,21 @@ export function CommunityMap() {
         <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_360px]">
           <MapPanel members={placedMembers} hovered={hovered} setHovered={setHovered} tick={tick} loading={loading} />
           <aside className="flex flex-col gap-6">
-            <JoinCard
-              handle={handle}
-              setHandle={setHandle}
-              region={region}
-              setRegion={setRegion}
-              account={account}
-              busy={busy}
-              status={status}
-              onJoin={onJoin}
-              onConnect={onConnect}
-            />
+            {myMember ? (
+              <MyCard member={myMember} onOpenCard={() => showMemberCard(myMember)} />
+            ) : (
+              <JoinCard
+                handle={handle}
+                setHandle={setHandle}
+                region={region}
+                setRegion={setRegion}
+                account={account}
+                busy={busy}
+                status={status}
+                onJoin={onJoin}
+                onConnect={onConnect}
+              />
+            )}
             <RegionList counts={counts} active={region} setRegion={setRegion} total={members.length} />
           </aside>
         </div>
