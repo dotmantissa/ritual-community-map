@@ -51,9 +51,44 @@ export function CommunityMap() {
   const [success, setSuccess] = useState<SuccessInfo | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
 
+  const myMember = useMemo(() => {
+    if (!account) return null;
+    return members.find((m) => m.address.toLowerCase() === account.toLowerCase()) ?? null;
+  }, [account, members]);
+
+  function showMemberCard(member: Member) {
+    const inRegion = members.filter((m) => m.region === member.region);
+    const rank = inRegion.findIndex((m) => m.address.toLowerCase() === member.address.toLowerCase()) + 1;
+    setSuccess({
+      handle: member.handle,
+      region: member.region,
+      rank: Math.max(rank, 1),
+      total: inRegion.length,
+      address: member.address,
+    });
+  }
+
   useEffect(() => {
     const i = setInterval(() => setTick((t) => t + 1), 700);
     return () => clearInterval(i);
+  }, []);
+
+  // Auto-detect already-connected wallet
+  useEffect(() => {
+    async function detect() {
+      const eth = getInjected();
+      if (!eth) return;
+      try {
+        const accounts: string[] = await eth.request({ method: "eth_accounts" });
+        if (accounts[0]) {
+          const a = accounts[0] as `0x${string}`;
+          setAccount(a);
+          const found = members.find((m) => m.address.toLowerCase() === a.toLowerCase());
+          if (found) showMemberCard(found);
+        }
+      } catch {}
+    }
+    detect();
   }, []);
 
   async function refresh(): Promise<Member[]> {
@@ -115,6 +150,8 @@ export function CommunityMap() {
       setStatus("");
       const a = await connectWallet();
       setAccount(a);
+      const found = members.find((m) => m.address.toLowerCase() === a.toLowerCase());
+      if (found) showMemberCard(found);
     } catch (e: any) {
       setStatus(e?.message ?? "Connect failed");
     }
@@ -197,17 +234,21 @@ export function CommunityMap() {
         <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_360px]">
           <MapPanel members={placedMembers} hovered={hovered} setHovered={setHovered} tick={tick} loading={loading} />
           <aside className="flex flex-col gap-6">
-            <JoinCard
-              handle={handle}
-              setHandle={setHandle}
-              region={region}
-              setRegion={setRegion}
-              account={account}
-              busy={busy}
-              status={status}
-              onJoin={onJoin}
-              onConnect={onConnect}
-            />
+            {myMember ? (
+              <MyCard member={myMember} onOpenCard={() => showMemberCard(myMember)} />
+            ) : (
+              <JoinCard
+                handle={handle}
+                setHandle={setHandle}
+                region={region}
+                setRegion={setRegion}
+                account={account}
+                busy={busy}
+                status={status}
+                onJoin={onJoin}
+                onConnect={onConnect}
+              />
+            )}
             <RegionList counts={counts} active={region} setRegion={setRegion} total={members.length} />
           </aside>
         </div>
@@ -447,6 +488,40 @@ function CountryCombobox({ region, setRegion }: { region: string; setRegion: (s:
         </div>
       )}
     </div>
+  );
+}
+
+function MyCard({ member, onOpenCard }: { member: Member; onOpenCard: () => void }) {
+  const country = getCountry(member.region);
+  const inRegion = member.region;
+  return (
+    <section className="rounded-sm border border-border bg-card/60 p-5">
+      <div className="text-[11px] uppercase tracking-[0.3em] text-[var(--ritual-green-bright)]">// initiated</div>
+      <h2 className="mt-1 text-lg font-bold uppercase tracking-wider text-foreground">You are in the lattice</h2>
+
+      <div className="mt-4 flex items-center gap-3">
+        <img
+          src={avatarUrl(member.handle)}
+          alt={member.handle}
+          className="h-12 w-12 rounded-sm border border-border object-cover"
+          onError={(e) => ((e.target as HTMLImageElement).style.visibility = "hidden")}
+        />
+        <div className="min-w-0">
+          <div className="truncate text-sm font-bold text-foreground">@{member.handle}</div>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="text-base">{country?.flag}</span>
+            <span>{country?.name ?? inRegion}</span>
+          </div>
+        </div>
+      </div>
+
+      <button
+        onClick={onOpenCard}
+        className="mt-5 w-full rounded-sm bg-[var(--ritual-green)] px-4 py-3 text-xs font-black uppercase tracking-[0.25em] text-primary-foreground transition-colors hover:bg-[var(--ritual-green-bright)]"
+      >
+        View My Card
+      </button>
+    </section>
   );
 }
 
