@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ComposableMap, Geographies, Geography, Marker } from "react-simple-maps";
 import { toPng } from "html-to-image";
 import { publicClient, connectWallet, getWalletClient, getInjected, ensureChain } from "@/lib/wallet";
-import { RITUAL_MAP_ABI, RITUAL_MAP_ADDRESS } from "@/lib/ritual-contract";
+import { RITUAL_MAP_ABI, RITUAL_MAP_ADDRESS, RITUAL_MAP_DEPLOY_BLOCK } from "@/lib/ritual-contract";
 import { COUNTRIES, getCountry } from "@/lib/countries";
 import logo from "@/assets/ritual-logo.png";
 
@@ -138,11 +138,14 @@ export function CommunityMap() {
       await ensureChain();
       const w = getWalletClient(acct!);
       setStatus("Awaiting signature…");
+      // Use a tiny tip so total fee stays negligible on the Ritual testnet.
       const hash = await w.writeContract({
         address: RITUAL_MAP_ADDRESS,
         abi: RITUAL_MAP_ABI,
         functionName: "join",
         args: [handle.replace(/^@/, "").trim(), region],
+        maxFeePerGas: 1_000_000_000n, // 1 gwei cap
+        maxPriorityFeePerGas: 1n, // ~0 tip
       });
       setStatus("Transmitting → " + hash.slice(0, 10) + "…");
       await publicClient.waitForTransactionReceipt({ hash });
