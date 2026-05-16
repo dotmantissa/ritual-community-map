@@ -1,4 +1,7 @@
-export const RITUAL_MAP_ADDRESS = "0x84725642453c2dcde42d075b5f3ab96b5922a44b" as const;
+export const RITUAL_MAP_ADDRESS = "0x61c4ab75fc3304a0c506a54596dfcdf18688d624" as const;
+
+// Block the contract was deployed at; used as fromBlock for log queries.
+export const RITUAL_MAP_DEPLOY_BLOCK = 19779048n;
 
 export const RITUAL_MAP_ABI = [
   {
@@ -20,18 +23,6 @@ export const RITUAL_MAP_ABI = [
     type: "function",
   },
   { inputs: [], name: "count", outputs: [{ type: "uint256" }], stateMutability: "view", type: "function" },
-  {
-    inputs: [],
-    name: "getAll",
-    outputs: [
-      { name: "addrs", type: "address[]" },
-      { name: "handles", type: "string[]" },
-      { name: "regions", type: "string[]" },
-      { name: "timestamps", type: "uint256[]" },
-    ],
-    stateMutability: "view",
-    type: "function",
-  },
   {
     inputs: [{ type: "address" }],
     name: "joined",

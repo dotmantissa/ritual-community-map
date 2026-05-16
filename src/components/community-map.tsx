@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ComposableMap, Geographies, Geography, Marker } from "react-simple-maps";
 import { toPng } from "html-to-image";
 import { publicClient, connectWallet, getWalletClient, getInjected, ensureChain } from "@/lib/wallet";
-import { RITUAL_MAP_ABI, RITUAL_MAP_ADDRESS } from "@/lib/ritual-contract";
+import { RITUAL_MAP_ABI, RITUAL_MAP_ADDRESS, RITUAL_MAP_DEPLOY_BLOCK } from "@/lib/ritual-contract";
 import { COUNTRIES, getCountry } from "@/lib/countries";
 import logo from "@/assets/ritual-logo.png";
 
@@ -58,18 +58,28 @@ export function CommunityMap() {
 
   async function refresh(): Promise<Member[]> {
     try {
-      const res = (await publicClient.readContract({
+      const logs = await publicClient.getContractEvents({
         address: RITUAL_MAP_ADDRESS,
         abi: RITUAL_MAP_ABI,
-        functionName: "getAll",
-      })) as readonly [readonly `0x${string}`[], readonly string[], readonly string[], readonly bigint[]];
-      const [addrs, handles, regions, ts] = res;
-      const list: Member[] = addrs.map((a, i) => ({
-        address: a,
-        handle: handles[i],
-        region: regions[i],
-        timestamp: Number(ts[i]),
-      }));
+        eventName: "Joined",
+        fromBlock: RITUAL_MAP_DEPLOY_BLOCK,
+        toBlock: "latest",
+      });
+      // Dedup by address (first join wins) to mirror on-chain `joined` mapping
+      const seen = new Set<string>();
+      const list: Member[] = [];
+      for (const log of logs) {
+        const a = (log.args as any).user as `0x${string}`;
+        const key = a.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        list.push({
+          address: a,
+          handle: (log.args as any).handle as string,
+          region: (log.args as any).region as string,
+          timestamp: Number((log.args as any).timestamp as bigint),
+        });
+      }
       setMembers(list);
       return list;
     } catch (e) {
@@ -128,11 +138,14 @@ export function CommunityMap() {
       await ensureChain();
       const w = getWalletClient(acct!);
       setStatus("Awaiting signature…");
+      // Use a tiny tip so total fee stays negligible on the Ritual testnet.
       const hash = await w.writeContract({
         address: RITUAL_MAP_ADDRESS,
         abi: RITUAL_MAP_ABI,
         functionName: "join",
         args: [handle.replace(/^@/, "").trim(), region],
+        maxFeePerGas: 1_000_000_000n, // 1 gwei cap
+        maxPriorityFeePerGas: 1n, // ~0 tip
       });
       setStatus("Transmitting → " + hash.slice(0, 10) + "…");
       await publicClient.waitForTransactionReceipt({ hash });
