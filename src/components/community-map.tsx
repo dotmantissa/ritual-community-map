@@ -132,6 +132,8 @@ export function CommunityMap() {
       setStatus("");
       const a = await connectWallet();
       setAccount(a);
+      const found = members.find((m) => m.address.toLowerCase() === a.toLowerCase());
+      if (found) showMemberCard(found);
     } catch (e: any) {
       setStatus(e?.message ?? "Connect failed");
     }
