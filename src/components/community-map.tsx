@@ -73,6 +73,24 @@ export function CommunityMap() {
     return () => clearInterval(i);
   }, []);
 
+  // Auto-detect already-connected wallet
+  useEffect(() => {
+    async function detect() {
+      const eth = getInjected();
+      if (!eth) return;
+      try {
+        const accounts: string[] = await eth.request({ method: "eth_accounts" });
+        if (accounts[0]) {
+          const a = accounts[0] as `0x${string}`;
+          setAccount(a);
+          const found = members.find((m) => m.address.toLowerCase() === a.toLowerCase());
+          if (found) showMemberCard(found);
+        }
+      } catch {}
+    }
+    detect();
+  }, []);
+
   async function refresh(): Promise<Member[]> {
     try {
       const logs = await publicClient.getContractEvents({
