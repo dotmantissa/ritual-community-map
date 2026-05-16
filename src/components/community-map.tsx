@@ -51,6 +51,23 @@ export function CommunityMap() {
   const [success, setSuccess] = useState<SuccessInfo | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
 
+  const myMember = useMemo(() => {
+    if (!account) return null;
+    return members.find((m) => m.address.toLowerCase() === account.toLowerCase()) ?? null;
+  }, [account, members]);
+
+  function showMemberCard(member: Member) {
+    const inRegion = members.filter((m) => m.region === member.region);
+    const rank = inRegion.findIndex((m) => m.address.toLowerCase() === member.address.toLowerCase()) + 1;
+    setSuccess({
+      handle: member.handle,
+      region: member.region,
+      rank: Math.max(rank, 1),
+      total: inRegion.length,
+      address: member.address,
+    });
+  }
+
   useEffect(() => {
     const i = setInterval(() => setTick((t) => t + 1), 700);
     return () => clearInterval(i);
