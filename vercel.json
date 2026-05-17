@@ -1,5 +1,5 @@
 {
-  "buildCommand": "npm run build",
+  "buildCommand": "npm run build && node scripts/generate-vercel-index.mjs",
   "outputDirectory": "dist/client",
   "rewrites": [
     {

@@ -1,5 +1,4 @@
-import { RITUAL_MAP_ADDRESS } from "../src/lib/ritual-contract";
-
+const RITUAL_MAP_ADDRESS = "0x61c4ab75fc3304a0c506a54596dfcdf18688d624";
 const INDEXER_TRANSACTIONS_URL = `https://explorer.ritualfoundation.org/api/indexer-proxy/api/v1/addresses/${RITUAL_MAP_ADDRESS}/transactions`;
 const INDEXER_TRANSACTION_URL = "https://explorer.ritualfoundation.org/api/indexer-proxy/api/v1/transactions";
 const JOIN_SELECTOR = "0x29803b21";
@@ -10,28 +9,56 @@ type IndexedTransaction = {
   input_data?: string;
 };
 
-export default async function handler(request: Request): Promise<Response> {
-  const requestUrl = new URL(request.url);
+type QueryValue = string | string[] | undefined;
+
+type VercelRequestLike = {
+  query?: Record<string, QueryValue>;
+  url?: string;
+};
+
+type VercelResponseLike = {
+  status: (code: number) => VercelResponseLike;
+  setHeader: (name: string, value: string) => void;
+  send: (body: string) => void;
+  json: (body: unknown) => void;
+};
+
+function readParam(request: VercelRequestLike, key: string): string | null {
+  const queryValue = request.query?.[key];
+  if (Array.isArray(queryValue)) return queryValue[0] ?? null;
+  if (typeof queryValue === "string") return queryValue;
+
+  if (!request.url) return null;
+  const requestUrl = new URL(request.url, "https://ritual-community-map.vercel.app");
+  return requestUrl.searchParams.get(key);
+}
+
+export default async function handler(request: VercelRequestLike, response: VercelResponseLike) {
   const params = new URLSearchParams({
-    limit: requestUrl.searchParams.get("limit") ?? "1000",
-    offset: requestUrl.searchParams.get("offset") ?? "0",
-    from_date: requestUrl.searchParams.get("from_date") ?? "2026-05-01",
-    to_date: requestUrl.searchParams.get("to_date") ?? requestUrl.searchParams.get("from_date") ?? "2026-05-01",
+    limit: readParam(request, "limit") ?? "1000",
+    offset: readParam(request, "offset") ?? "0",
+    from_date: readParam(request, "from_date") ?? "2026-05-01",
+    to_date:
+      readParam(request, "to_date") ?? readParam(request, "from_date") ?? "2026-05-01",
   });
 
-  const response = await fetch(`${INDEXER_TRANSACTIONS_URL}?${params}`);
-  if (!response.ok) {
-    return new Response(response.body, {
-      status: response.status,
-      headers: {
-        "content-type": response.headers.get("content-type") ?? "application/json",
-        "cache-control": "no-store",
-      },
-    });
+  const upstream = await fetch(`${INDEXER_TRANSACTIONS_URL}?${params}`);
+  const upstreamText = await upstream.text();
+
+  response.setHeader("cache-control", "no-store");
+  response.setHeader(
+    "content-type",
+    upstream.headers.get("content-type") ?? "application/json",
+  );
+
+  if (!upstream.ok) {
+    response.status(upstream.status).send(upstreamText);
+    return;
   }
 
-  const data = await response.json();
-  const transactions: IndexedTransaction[] = Array.isArray(data.transactions) ? data.transactions : [];
+  const data = JSON.parse(upstreamText) as { transactions?: IndexedTransaction[] };
+  const transactions = Array.isArray(data.transactions) ? data.transactions : [];
+
   data.transactions = await Promise.all(
     transactions.map(async (transaction) => {
       if (transaction.method_selector !== JOIN_SELECTOR || typeof transaction.input_data === "string") {
@@ -40,15 +67,11 @@ export default async function handler(request: Request): Promise<Response> {
 
       const details = await fetch(`${INDEXER_TRANSACTION_URL}/${transaction.tx_hash}`);
       if (!details.ok) return transaction;
-      const detailData = await details.json();
+
+      const detailData = (await details.json()) as { input_data?: string };
       return { ...transaction, input_data: detailData.input_data };
     }),
   );
 
-  return new Response(JSON.stringify(data), {
-    headers: {
-      "content-type": "application/json",
-      "cache-control": "no-store",
-    },
-  });
+  response.status(upstream.status).json(data);
 }
