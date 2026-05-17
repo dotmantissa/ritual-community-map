@@ -65,6 +65,13 @@ function avatarUrl(handle: string) {
   return `https://unavatar.io/x/${encodeURIComponent(clean)}`;
 }
 
+function avatarFallbackUrl(handle: string) {
+  const clean = handle.replace(/^@/, "").trim() || "initiate";
+  const label = clean.slice(0, 2).toUpperCase();
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96"><rect width="96" height="96" fill="#020403"/><rect x="1" y="1" width="94" height="94" fill="none" stroke="#18ff9a" stroke-width="2"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#18ff9a" font-family="monospace" font-size="28" font-weight="700">${label}</text></svg>`;
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
 function normalizeHandle(handle: string) {
   return handle.replace(/^@+/, "").trim().toLowerCase();
 }
@@ -762,10 +769,17 @@ function MapPanel({
           {hovered && (
             <div className="pointer-events-none absolute left-3 top-3 flex max-w-xs items-center gap-3 rounded-sm border border-[var(--ritual-green)] bg-background/90 p-2 backdrop-blur-md">
               <img
+                key={hovered.address}
                 src={avatarUrl(hovered.handle)}
                 alt={hovered.handle}
                 className="h-10 w-10 rounded-sm border border-border object-cover"
-                onError={(e) => ((e.target as HTMLImageElement).style.visibility = "hidden")}
+                onLoad={(event) => {
+                  event.currentTarget.style.visibility = "visible";
+                }}
+                onError={(event) => {
+                  event.currentTarget.src = avatarFallbackUrl(hovered.handle);
+                  event.currentTarget.style.visibility = "visible";
+                }}
               />
               <div className="text-xs">
                 <div className="font-bold text-foreground">@{hovered.handle}</div>
