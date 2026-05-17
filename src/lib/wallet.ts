@@ -5,7 +5,9 @@ export const ritualChain = defineChain({
   name: "Ritual",
   nativeCurrency: { name: "Ritual", symbol: "RITUAL", decimals: 18 },
   rpcUrls: { default: { http: ["https://rpc.ritualfoundation.org"] } },
-  blockExplorers: { default: { name: "Ritual Explorer", url: "https://explorer.ritualfoundation.org" } },
+  blockExplorers: {
+    default: { name: "Ritual Explorer", url: "https://explorer.ritualfoundation.org" },
+  },
 });
 
 export const publicClient = createPublicClient({ chain: ritualChain, transport: http() });
@@ -45,7 +47,7 @@ export async function ensureChain() {
             chainName: "Ritual",
             nativeCurrency: { name: "Ritual", symbol: "RITUAL", decimals: 18 },
             rpcUrls: ["https://rpc.ritualfoundation.org"],
-            blockExplorers: ["https://explorer.ritualfoundation.org"],
+            blockExplorerUrls: ["https://explorer.ritualfoundation.org"],
           },
         ],
       });

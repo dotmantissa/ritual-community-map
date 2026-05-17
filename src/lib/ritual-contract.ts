@@ -1,10 +1,10 @@
-export const DEFAULT_RITUAL_MAP_ADDRESS = "0x84725642453c2dcde42d075b5f3ab96b5922a44b" as const;
+export const DEFAULT_RITUAL_MAP_ADDRESS = "0x61c4ab75fc3304a0c506a54596dfcdf18688d624" as const;
 
 export const RITUAL_MAP_ADDRESS = (import.meta.env.VITE_RITUAL_MAP_CONTRACT_ADDRESS ??
   DEFAULT_RITUAL_MAP_ADDRESS) as `0x${string}`;
 
 // Safe lower-bound block for log queries on the deployed contract.
-export const RITUAL_MAP_DEPLOY_BLOCK = 19603000n;
+export const RITUAL_MAP_DEPLOY_BLOCK = 19779048n;
 
 export const RITUAL_MAP_ABI = [
   {

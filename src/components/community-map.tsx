@@ -8,7 +8,7 @@ import logo from "@/assets/ritual-logo.png";
 
 const GEO_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
 const JOIN_SELECTOR = "0x29803b21";
-const LOG_BLOCK_RANGE = 99_999n;
+const LOG_BLOCK_RANGE = 49_999n;
 const INDEXER_TRANSACTIONS_URL = "/api/community-map-transactions";
 
 export type Member = {
