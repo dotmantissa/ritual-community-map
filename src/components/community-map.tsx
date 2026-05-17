@@ -1162,7 +1162,7 @@ function ShareCardModal({
 ${country?.flag ?? ""} ${country?.name ?? info.region} · #${info.rank} of ${displayTotal}
 @${info.handle} pinned to the lattice ⛧
 
-ritual-community-map.lovable.app`;
+https://ritual-community-map.vercel.app/`;
 
   async function download() {
     if (!cardRef.current) return;
