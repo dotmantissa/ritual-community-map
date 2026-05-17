@@ -1,5 +1,5 @@
 {
-  "buildCommand": "npm run build && node scripts/generate-vercel-index.mjs",
+  "buildCommand": "npx vite build --config vite.vercel.config.ts",
   "outputDirectory": "dist/client",
   "rewrites": [
     {
