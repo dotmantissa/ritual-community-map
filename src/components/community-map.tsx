@@ -1,7 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ComposableMap, Geographies, Geography, Marker } from "react-simple-maps";
 import { toPng } from "html-to-image";
-import { publicClient, connectWallet, getWalletClient, getInjected, ensureChain } from "@/lib/wallet";
+import {
+  publicClient,
+  connectWallet,
+  getWalletClient,
+  getInjected,
+  ensureChain,
+} from "@/lib/wallet";
 import { RITUAL_MAP_ABI, RITUAL_MAP_ADDRESS, RITUAL_MAP_DEPLOY_BLOCK } from "@/lib/ritual-contract";
 import { COUNTRIES, getCountry } from "@/lib/countries";
 import logo from "@/assets/ritual-logo.png";
@@ -16,6 +22,9 @@ export type Member = {
   handle: string;
   region: string;
   timestamp: number;
+  blockNumber?: number;
+  transactionIndex?: number;
+  regionRank?: number;
 };
 
 type SuccessInfo = {
@@ -35,6 +44,10 @@ type IndexedTransaction = {
   tx_index: number;
   method_selector: string;
   input_data?: string;
+};
+
+type ApiMember = Member & {
+  address: `0x${string}`;
 };
 
 function regionCoords(id: string): [number, number] {
@@ -57,7 +70,8 @@ function normalizeHandle(handle: string) {
 }
 
 function decodeAbiString(args: string, index: number): string {
-  const readWord = (offset: number) => BigInt(`0x${args.slice(2 + offset * 2, 2 + (offset + 32) * 2)}`);
+  const readWord = (offset: number) =>
+    BigInt(`0x${args.slice(2 + offset * 2, 2 + (offset + 32) * 2)}`);
   const offset = Number(readWord(index * 32));
   const length = Number(readWord(offset));
   const hex = args.slice(2 + (offset + 32) * 2, 2 + (offset + 32 + length) * 2);
@@ -104,12 +118,7 @@ async function fetchMembersFromContract(): Promise<Member[]> {
     functionName: "getAll",
   });
 
-  const length = Math.min(
-    addresses.length,
-    handles.length,
-    regions.length,
-    timestamps.length,
-  );
+  const length = Math.min(addresses.length, handles.length, regions.length, timestamps.length);
   const members: Member[] = [];
   for (let index = 0; index < length; index++) {
     members.push({
@@ -120,7 +129,7 @@ async function fetchMembersFromContract(): Promise<Member[]> {
     });
   }
 
-  return dedupeMembersByAddress(members);
+  return normalizeMembers(members);
 }
 
 function dedupeMembersByAddress(members: Member[]): Member[] {
@@ -135,10 +144,79 @@ function dedupeMembersByAddress(members: Member[]): Member[] {
   return list;
 }
 
+function orderValue(value: number | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+}
+
+function normalizeTimestamp(value: number) {
+  return Math.floor(value > 10_000_000_000 ? value / 1000 : value);
+}
+
+function sortMembersByJoinOrder(members: Member[]): Member[] {
+  return [...members]
+    .map((member, index) => ({ member, index }))
+    .sort((a, b) => {
+      const blockDiff = orderValue(a.member.blockNumber) - orderValue(b.member.blockNumber);
+      if (blockDiff !== 0) return blockDiff;
+      const txDiff = orderValue(a.member.transactionIndex) - orderValue(b.member.transactionIndex);
+      if (txDiff !== 0) return txDiff;
+      const timeDiff = a.member.timestamp - b.member.timestamp;
+      if (timeDiff !== 0) return timeDiff;
+      return a.index - b.index;
+    })
+    .map(({ member }) => member);
+}
+
+function normalizeMembers(members: Member[]): Member[] {
+  const regionCounts = new Map<string, number>();
+  return dedupeMembersByAddress(sortMembersByJoinOrder(members)).map((member) => {
+    const regionRank = (regionCounts.get(member.region) ?? 0) + 1;
+    regionCounts.set(member.region, regionRank);
+    return { ...member, regionRank };
+  });
+}
+
+function mergeMemberLists(current: Member[], incoming: Member[]): Member[] {
+  const byAddress = new Map<string, Member>();
+  for (const member of current) byAddress.set(member.address.toLowerCase(), member);
+  for (const member of incoming) byAddress.set(member.address.toLowerCase(), member);
+  return normalizeMembers([...byAddress.values()]);
+}
+
+function membersFromTransactions(transactions: IndexedTransaction[]): Member[] {
+  const members = transactions
+    .filter(
+      (tx): tx is IndexedTransaction & { input_data: string } =>
+        tx.status === 1 &&
+        tx.method_selector === JOIN_SELECTOR &&
+        typeof tx.input_data === "string",
+    )
+    .sort((a, b) => a.block_number - b.block_number || a.tx_index - b.tx_index)
+    .flatMap((tx) => {
+      const decoded = decodeJoinInput(tx.input_data);
+      if (!decoded) return [];
+      return [
+        {
+          address: tx.from_address as `0x${string}`,
+          handle: decoded.handle,
+          region: decoded.region,
+          timestamp: normalizeTimestamp(Number(tx.block_timestamp)),
+          blockNumber: tx.block_number,
+          transactionIndex: tx.tx_index,
+        },
+      ];
+    });
+  return normalizeMembers(members);
+}
+
 async function fetchMembersFromEvents(): Promise<Member[]> {
   const latest = await publicClient.getBlockNumber();
   const members: Member[] = [];
-  for (let fromBlock = RITUAL_MAP_DEPLOY_BLOCK; fromBlock <= latest; fromBlock += LOG_BLOCK_RANGE + 1n) {
+  for (
+    let fromBlock = RITUAL_MAP_DEPLOY_BLOCK;
+    fromBlock <= latest;
+    fromBlock += LOG_BLOCK_RANGE + 1n
+  ) {
     const toBlock = fromBlock + LOG_BLOCK_RANGE > latest ? latest : fromBlock + LOG_BLOCK_RANGE;
     const chunk = await publicClient.getContractEvents({
       address: RITUAL_MAP_ADDRESS,
@@ -153,56 +231,62 @@ async function fetchMembersFromEvents(): Promise<Member[]> {
         handle: log.args.handle as string,
         region: log.args.region as string,
         timestamp: Number(log.args.timestamp as bigint),
+        blockNumber: Number(log.blockNumber),
+        transactionIndex: Number(log.transactionIndex ?? log.logIndex ?? 0),
       })),
     );
   }
 
-  return dedupeMembersByAddress(members);
+  return normalizeMembers(members);
 }
 
-async function fetchMembersFromIndexer(): Promise<Member[]> {
-  const firstDate = new Date("2026-05-01T00:00:00.000Z");
-  const lastDate = addDays(new Date(), 1);
-  const limit = 1000;
-  const transactions: IndexedTransaction[] = [];
-
-  for (let fromDate = firstDate; fromDate <= lastDate; fromDate = addDays(fromDate, 30)) {
-    const windowEnd = addDays(fromDate, 29);
-    const toDate = windowEnd > lastDate ? lastDate : windowEnd;
-    for (let offset = 0; ; offset += limit) {
-      const params = new URLSearchParams({
-        limit: String(limit),
-        offset: String(offset),
-        from_date: dateString(fromDate),
-        to_date: dateString(toDate),
-      });
-      const response = await fetch(`${INDEXER_TRANSACTIONS_URL}?${params}`);
-      if (!response.ok) throw new Error("Indexer fetch failed");
-      const data = await response.json();
-      const page: IndexedTransaction[] = Array.isArray(data.transactions) ? data.transactions : [];
-      transactions.push(...page);
-      if (!data.hasMore || page.length === 0) break;
-    }
+async function fetchMembersFromIndexer(force = false): Promise<Member[]> {
+  const params = new URLSearchParams({
+    all: "1",
+    members: "1",
+    limit: "1000",
+    from_date: "2026-05-01",
+    to_date: dateString(addDays(new Date(), 1)),
+  });
+  if (force) {
+    params.set("fresh", "1");
+    params.set("t", String(Date.now()));
   }
-  const members = transactions
-    .filter((tx): tx is IndexedTransaction & { input_data: string } => tx.status === 1 && tx.method_selector === JOIN_SELECTOR && typeof tx.input_data === "string")
-    .sort((a, b) => a.block_number - b.block_number || a.tx_index - b.tx_index)
-    .flatMap((tx) => {
-      const decoded = decodeJoinInput(tx.input_data);
-      if (!decoded) return [];
-      return [
-        {
-          address: tx.from_address as `0x${string}`,
-          handle: decoded.handle,
-          region: decoded.region,
-          timestamp: Math.floor(Number(tx.block_timestamp) / 1000),
-        },
-      ];
-    });
-  return dedupeMembersByAddress(members);
+
+  const response = await fetch(`${INDEXER_TRANSACTIONS_URL}?${params}`, {
+    cache: force ? "no-store" : "default",
+  });
+  if (!response.ok) throw new Error("Indexer fetch failed");
+  const data = await response.json();
+  if (Array.isArray(data.members) && data.members.length > 0) {
+    return normalizeMembers(
+      data.members.map((member: ApiMember) => ({
+        address: member.address,
+        handle: member.handle,
+        region: member.region,
+        timestamp: Number(member.timestamp),
+        blockNumber: member.blockNumber,
+        transactionIndex: member.transactionIndex,
+        regionRank: member.regionRank,
+      })),
+    );
+  }
+
+  const transactions: IndexedTransaction[] = Array.isArray(data.transactions)
+    ? data.transactions
+    : [];
+  return membersFromTransactions(transactions);
 }
 
-async function fetchAllMembers(): Promise<Member[]> {
+async function fetchAllMembers(force = false): Promise<Member[]> {
+  let indexerMembers: Member[] = [];
+  try {
+    indexerMembers = await fetchMembersFromIndexer(force);
+    if (indexerMembers.length > 0) return indexerMembers;
+  } catch (error) {
+    console.error(error);
+  }
+
   const expectedCount = await getJoinedCount();
   let contractMembers: Member[] = [];
   try {
@@ -210,7 +294,7 @@ async function fetchAllMembers(): Promise<Member[]> {
   } catch (error) {
     console.error(error);
   }
-  if (contractMembers.length >= expectedCount) return contractMembers;
+  if (contractMembers.length >= expectedCount) return normalizeMembers(contractMembers);
 
   let eventMembers: Member[] = [];
   try {
@@ -218,20 +302,14 @@ async function fetchAllMembers(): Promise<Member[]> {
   } catch (error) {
     console.error(error);
   }
-  if (eventMembers.length >= expectedCount) return eventMembers;
+  if (eventMembers.length >= expectedCount) return normalizeMembers(eventMembers);
 
-  let indexerMembers: Member[] = [];
-  try {
-    indexerMembers = await fetchMembersFromIndexer();
-  } catch (error) {
-    console.error(error);
-  }
-  const combinedMembers = dedupeMembersByAddress([
+  const combinedMembers = normalizeMembers([
+    ...indexerMembers,
     ...contractMembers,
     ...eventMembers,
-    ...indexerMembers,
   ]);
-  if (combinedMembers.length >= expectedCount) return combinedMembers;
+  if (combinedMembers.length > 0) return combinedMembers;
   throw new Error("Could not fetch every registered user");
 }
 
@@ -239,6 +317,7 @@ export function CommunityMap() {
   const [members, setMembers] = useState<Member[]>([]);
   const membersRef = useRef<Member[]>([]);
   const refreshPromiseRef = useRef<Promise<Member[]> | null>(null);
+  const autoShownAccountRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [account, setAccount] = useState<`0x${string}` | null>(null);
   const [handle, setHandle] = useState("");
@@ -255,17 +334,26 @@ export function CommunityMap() {
     return members.find((m) => m.address.toLowerCase() === account.toLowerCase()) ?? null;
   }, [account, members]);
 
-  function showMemberCard(member: Member) {
-    const inRegion = members.filter((m) => m.region === member.region);
-    const rank = inRegion.findIndex((m) => m.address.toLowerCase() === member.address.toLowerCase()) + 1;
-    setSuccess({
-      handle: member.handle,
-      region: member.region,
-      rank: Math.max(rank, 1),
-      total: inRegion.length,
-      address: member.address,
-    });
-  }
+  const showMemberCard = useCallback(
+    (member: Member) => {
+      const source = membersRef.current.length > 0 ? membersRef.current : members;
+      const normalized = normalizeMembers(source);
+      const current =
+        normalized.find((m) => m.address.toLowerCase() === member.address.toLowerCase()) ?? member;
+      const inRegion = normalized.filter((m) => m.region === current.region);
+      const rank =
+        current.regionRank ??
+        inRegion.findIndex((m) => m.address.toLowerCase() === current.address.toLowerCase()) + 1;
+      setSuccess({
+        handle: current.handle,
+        region: current.region,
+        rank: Math.max(rank, 1),
+        total: inRegion.length,
+        address: current.address,
+      });
+    },
+    [members],
+  );
 
   useEffect(() => {
     const i = setInterval(() => setTick((t) => t + 1), 700);
@@ -278,26 +366,35 @@ export function CommunityMap() {
       const eth = getInjected();
       if (!eth) return;
       try {
-        const accounts: string[] = await eth.request({ method: "eth_accounts" });
+        const accounts = (await eth.request({ method: "eth_accounts" })) as string[];
         if (accounts[0]) {
-          const a = accounts[0] as `0x${string}`;
-          setAccount(a);
-          const found = members.find((m) => m.address.toLowerCase() === a.toLowerCase());
-          if (found) showMemberCard(found);
+          setAccount(accounts[0] as `0x${string}`);
         }
-      } catch {}
+      } catch (error) {
+        console.error(error);
+      }
     }
     detect();
   }, []);
+
+  useEffect(() => {
+    if (!account) return;
+    const accountKey = account.toLowerCase();
+    if (autoShownAccountRef.current === accountKey) return;
+    const found = membersRef.current.find((m) => m.address.toLowerCase() === accountKey);
+    if (!found) return;
+    autoShownAccountRef.current = accountKey;
+    showMemberCard(found);
+  }, [account, showMemberCard]);
 
   async function refresh(force = false): Promise<Member[]> {
     if (!force && refreshPromiseRef.current) return refreshPromiseRef.current;
 
     refreshPromiseRef.current = (async () => {
       try {
-        const list = await fetchAllMembers();
+        const list = await fetchAllMembers(force);
         const current = membersRef.current;
-        const next = list.length >= current.length ? list : current;
+        const next = current.length > 0 ? mergeMemberLists(current, list) : normalizeMembers(list);
         membersRef.current = next;
         setMembers(next);
         return next;
@@ -321,11 +418,13 @@ export function CommunityMap() {
         address: RITUAL_MAP_ADDRESS,
         abi: RITUAL_MAP_ABI,
         eventName: "Joined",
-        onLogs: () => refresh(),
+        onLogs: () => refresh(true),
         poll: true,
         pollingInterval: 4000,
       });
-    } catch {}
+    } catch (error) {
+      console.error(error);
+    }
     const i = setInterval(refresh, 8000);
     return () => {
       unwatch?.();
@@ -339,9 +438,12 @@ export function CommunityMap() {
       const a = await connectWallet();
       setAccount(a);
       const found = members.find((m) => m.address.toLowerCase() === a.toLowerCase());
-      if (found) showMemberCard(found);
-    } catch (e: any) {
-      setStatus(e?.message ?? "Connect failed");
+      if (found) {
+        autoShownAccountRef.current = a.toLowerCase();
+        showMemberCard(found);
+      }
+    } catch (error: unknown) {
+      setStatus(error instanceof Error ? error.message : "Connect failed");
     }
   }
 
@@ -355,8 +457,8 @@ export function CommunityMap() {
       try {
         acct = await connectWallet();
         setAccount(acct);
-      } catch (e: any) {
-        return setStatus(e?.message ?? "Wallet required");
+      } catch (error: unknown) {
+        return setStatus(error instanceof Error ? error.message : "Wallet required");
       }
     }
     setBusy(true);
@@ -367,7 +469,9 @@ export function CommunityMap() {
         setStatus("Syncing every registered user. Try again in a moment.");
         return;
       }
-      const existingHandle = list.find((m) => normalizeHandle(m.handle) === normalizeHandle(cleanHandle));
+      const existingHandle = list.find(
+        (m) => normalizeHandle(m.handle) === normalizeHandle(cleanHandle),
+      );
       if (existingHandle && existingHandle.address.toLowerCase() !== acct!.toLowerCase()) {
         setStatus(`@${cleanHandle} is already on the map with another wallet`);
         return;
@@ -387,38 +491,41 @@ export function CommunityMap() {
       setStatus("Transmitting → " + hash.slice(0, 10) + "…");
       const receipt = await publicClient.waitForTransactionReceipt({ hash });
       if (receipt.status !== "success") throw new Error("Transaction reverted");
-      const syncedList = await refresh(true);
-      let nextList = syncedList;
-      if (!syncedList.some((m) => m.address.toLowerCase() === acct!.toLowerCase())) {
-        nextList = dedupeMembersByAddress([
-          ...syncedList,
-          {
-            address: acct!,
-            handle: cleanHandle,
-            region,
-            timestamp: Math.floor(Date.now() / 1000),
-          },
-        ]);
-        membersRef.current = nextList;
-        setMembers(nextList);
-      }
-      // Find this user's record (latest entry matching address)
-      const mine = [...nextList].reverse().find((m) => m.address.toLowerCase() === acct!.toLowerCase());
+      const confirmedMember: Member = {
+        address: acct!,
+        handle: cleanHandle,
+        region,
+        timestamp: Math.floor(Date.now() / 1000),
+        blockNumber: Number(receipt.blockNumber),
+        transactionIndex: Number(receipt.transactionIndex),
+      };
+      const nextList = mergeMemberLists(membersRef.current, [confirmedMember]);
+      membersRef.current = nextList;
+      setMembers(nextList);
+      const mine =
+        nextList.find((m) => m.address.toLowerCase() === acct!.toLowerCase()) ?? confirmedMember;
       const inRegion = nextList.filter((m) => m.region === region);
-      const rank = mine ? inRegion.findIndex((m) => m.address.toLowerCase() === mine.address.toLowerCase()) + 1 : inRegion.length;
-      const total = inRegion.length;
+      const rank =
+        mine.regionRank ??
+        inRegion.findIndex((m) => m.address.toLowerCase() === mine.address.toLowerCase()) + 1;
       setSuccess({
         handle: cleanHandle,
         region,
         rank: Math.max(rank, 1),
-        total: Math.max(total, 1),
+        total: Math.max(inRegion.length, 1),
         address: acct!,
       });
       setBanner(`tx confirmed · ${hash.slice(0, 10)}…`);
       setStatus("Joined the lattice.");
       setTimeout(() => setBanner(null), 6000);
-    } catch (e: any) {
-      setStatus(e?.shortMessage ?? e?.message ?? "Failed");
+      void refresh(true);
+    } catch (error: unknown) {
+      if (error && typeof error === "object") {
+        const richError = error as { shortMessage?: string; message?: string };
+        setStatus(richError.shortMessage ?? richError.message ?? "Failed");
+      } else {
+        setStatus("Failed");
+      }
     } finally {
       setBusy(false);
     }
@@ -437,7 +544,7 @@ export function CommunityMap() {
         const [dx, dy] = jitter(m.address);
         return { ...m, lng: lng + dx, lat: lat + dy };
       }),
-    [members]
+    [members],
   );
 
   return (
@@ -447,7 +554,13 @@ export function CommunityMap() {
       <main className="relative mx-auto max-w-[1500px] px-4 pb-20 pt-6 lg:px-8">
         <Hero />
         <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_360px]">
-          <MapPanel members={placedMembers} hovered={hovered} setHovered={setHovered} tick={tick} loading={loading} />
+          <MapPanel
+            members={placedMembers}
+            hovered={hovered}
+            setHovered={setHovered}
+            tick={tick}
+            loading={loading}
+          />
           <aside className="flex flex-col gap-6">
             {myMember ? (
               <MyCard member={myMember} onOpenCard={() => showMemberCard(myMember)} />
@@ -464,13 +577,24 @@ export function CommunityMap() {
                 onConnect={onConnect}
               />
             )}
-            <RegionList counts={counts} active={region} setRegion={setRegion} total={members.length} />
+            <RegionList
+              counts={counts}
+              active={region}
+              setRegion={setRegion}
+              total={members.length}
+            />
           </aside>
         </div>
         <Marquee count={members.length} loading={loading} members={members} />
       </main>
       <Footer />
-      {success && <ShareCardModal info={success} onClose={() => setSuccess(null)} />}
+      {success && (
+        <ShareCardModal
+          info={success}
+          regionTotal={counts.get(success.region) ?? success.total}
+          onClose={() => setSuccess(null)}
+        />
+      )}
     </div>
   );
 }
@@ -481,10 +605,15 @@ function SuccessBanner({ text, onClose }: { text: string; onClose: () => void })
       <div className="mx-auto flex max-w-[1500px] items-center justify-between px-4 py-2 lg:px-8">
         <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.3em] text-foreground">
           <span className="size-1.5 animate-pulse rounded-full bg-[var(--ritual-green-bright)]" />
-          <span className="font-bold text-[var(--ritual-green-bright)]">// transaction confirmed</span>
+          <span className="font-bold text-[var(--ritual-green-bright)]">
+            // transaction confirmed
+          </span>
           <span className="hidden text-muted-foreground sm:inline">{text}</span>
         </div>
-        <button onClick={onClose} className="text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground">
+        <button
+          onClick={onClose}
+          className="text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground"
+        >
           dismiss ✕
         </button>
       </div>
@@ -492,14 +621,24 @@ function SuccessBanner({ text, onClose }: { text: string; onClose: () => void })
   );
 }
 
-function Topbar({ account, onConnect, count }: { account: string | null; onConnect: () => void; count: number }) {
+function Topbar({
+  account,
+  onConnect,
+  count,
+}: {
+  account: string | null;
+  onConnect: () => void;
+  count: number;
+}) {
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-background/70 backdrop-blur-md">
       <div className="mx-auto flex max-w-[1500px] items-center justify-between px-4 py-3 lg:px-8">
         <div className="flex items-center gap-3">
           <img src={logo} alt="Ritual" className="h-9 w-9 rounded-sm flicker" />
           <div className="leading-tight">
-            <div className="text-[10px] uppercase tracking-[0.32em] text-muted-foreground">Ritual</div>
+            <div className="text-[10px] uppercase tracking-[0.32em] text-muted-foreground">
+              Ritual
+            </div>
             <div className="text-sm font-bold tracking-wider text-foreground">COMMUNITY//MAP</div>
           </div>
         </div>
@@ -528,7 +667,9 @@ function Hero() {
     <section className="relative overflow-hidden rounded-sm border border-border bg-card/40 px-6 py-10 lg:px-10 lg:py-14">
       <div className="ritual-grid absolute inset-0 opacity-60" />
       <div className="relative">
-        <div className="text-[11px] uppercase tracking-[0.4em] text-[var(--ritual-green-bright)]">// the lattice is open</div>
+        <div className="text-[11px] uppercase tracking-[0.4em] text-[var(--ritual-green-bright)]">
+          // the lattice is open
+        </div>
         <h1
           className="glitch mt-3 text-4xl font-black uppercase leading-[0.95] tracking-tight text-foreground sm:text-6xl lg:text-7xl"
           data-text="Ritual Community Map"
@@ -536,8 +677,8 @@ function Hero() {
           Ritual Community Map
         </h1>
         <p className="mt-4 max-w-2xl text-sm text-muted-foreground sm:text-base">
-          Sign one transaction on Ritual testnet (chain 1979) and pin yourself to the autonomous-agent lattice.
-          Every pulse on the map is an on-chain initiate.
+          Sign one transaction on Ritual testnet (chain 1979) and pin yourself to the
+          autonomous-agent lattice. Every pulse on the map is an on-chain initiate.
         </p>
       </div>
     </section>
@@ -563,7 +704,9 @@ function MapPanel({
       <div className="relative">
         <div className="flex items-center justify-between border-b border-border px-4 py-2 text-[11px] uppercase tracking-[0.3em] text-muted-foreground">
           <span>// global lattice {loading ? "· syncing" : ""}</span>
-          <span className="text-[var(--ritual-green-bright)]">{tick % 2 === 0 ? "● live" : "○ live"}</span>
+          <span className="text-[var(--ritual-green-bright)]">
+            {tick % 2 === 0 ? "● live" : "○ live"}
+          </span>
         </div>
         <div className="relative" onMouseLeave={() => setHovered(null)}>
           <ComposableMap
@@ -574,8 +717,8 @@ function MapPanel({
             style={{ width: "100%", height: "auto" }}
           >
             <Geographies geography={GEO_URL}>
-              {({ geographies }: { geographies: any[] }) =>
-                geographies.map((geo: any) => (
+              {({ geographies }: { geographies: Array<{ rsmKey: string }> }) =>
+                geographies.map((geo) => (
                   <Geography
                     key={geo.rsmKey}
                     geography={geo}
@@ -599,8 +742,19 @@ function MapPanel({
             {members.map((m) => (
               <Marker key={m.address} coordinates={[m.lng, m.lat]}>
                 <g onMouseEnter={() => setHovered(m)} style={{ cursor: "pointer" }}>
-                  <circle r={8} fill="var(--ritual-green-bright)" opacity={0.18} className="ritual-ping" style={{ transformOrigin: "center" }} />
-                  <circle r={3.2} fill="var(--ritual-green-bright)" stroke="white" strokeWidth={0.6} />
+                  <circle
+                    r={8}
+                    fill="var(--ritual-green-bright)"
+                    opacity={0.18}
+                    className="ritual-ping"
+                    style={{ transformOrigin: "center" }}
+                  />
+                  <circle
+                    r={3.2}
+                    fill="var(--ritual-green-bright)"
+                    stroke="white"
+                    strokeWidth={0.6}
+                  />
                 </g>
               </Marker>
             ))}
@@ -616,7 +770,8 @@ function MapPanel({
               <div className="text-xs">
                 <div className="font-bold text-foreground">@{hovered.handle}</div>
                 <div className="text-muted-foreground">
-                  {getCountry(hovered.region)?.flag} {getCountry(hovered.region)?.name ?? hovered.region}
+                  {getCountry(hovered.region)?.flag}{" "}
+                  {getCountry(hovered.region)?.name ?? hovered.region}
                 </div>
                 <a
                   href={`https://explorer.ritualfoundation.org/address/${hovered.address}`}
@@ -635,7 +790,13 @@ function MapPanel({
   );
 }
 
-function CountryCombobox({ region, setRegion }: { region: string; setRegion: (s: string) => void }) {
+function CountryCombobox({
+  region,
+  setRegion,
+}: {
+  region: string;
+  setRegion: (s: string) => void;
+}) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -690,12 +851,16 @@ function CountryCombobox({ region, setRegion }: { region: string; setRegion: (s:
                     setQuery("");
                   }}
                   className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[color-mix(in_oklab,var(--ritual-green)_18%,transparent)] ${
-                    region === c.code ? "bg-[color-mix(in_oklab,var(--ritual-green)_12%,transparent)] text-foreground" : "text-foreground/90"
+                    region === c.code
+                      ? "bg-[color-mix(in_oklab,var(--ritual-green)_12%,transparent)] text-foreground"
+                      : "text-foreground/90"
                   }`}
                 >
                   <span className="text-base">{c.flag}</span>
                   <span className="flex-1">{c.name}</span>
-                  <span className="text-[10px] uppercase tracking-widest text-muted-foreground">{c.code}</span>
+                  <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+                    {c.code}
+                  </span>
                 </button>
               </li>
             ))}
@@ -711,8 +876,12 @@ function MyCard({ member, onOpenCard }: { member: Member; onOpenCard: () => void
   const inRegion = member.region;
   return (
     <section className="rounded-sm border border-border bg-card/60 p-5">
-      <div className="text-[11px] uppercase tracking-[0.3em] text-[var(--ritual-green-bright)]">// initiated</div>
-      <h2 className="mt-1 text-lg font-bold uppercase tracking-wider text-foreground">You are in the lattice</h2>
+      <div className="text-[11px] uppercase tracking-[0.3em] text-[var(--ritual-green-bright)]">
+        // initiated
+      </div>
+      <h2 className="mt-1 text-lg font-bold uppercase tracking-wider text-foreground">
+        You are in the lattice
+      </h2>
 
       <div className="mt-4 flex items-center gap-3">
         <img
@@ -764,10 +933,16 @@ function JoinCard({
   const cleanHandle = handle.replace(/^@/, "").trim();
   return (
     <section className="rounded-sm border border-border bg-card/60 p-5">
-      <div className="text-[11px] uppercase tracking-[0.3em] text-[var(--ritual-green-bright)]">// initiate</div>
-      <h2 className="mt-1 text-lg font-bold uppercase tracking-wider text-foreground">Join the lattice</h2>
+      <div className="text-[11px] uppercase tracking-[0.3em] text-[var(--ritual-green-bright)]">
+        // initiate
+      </div>
+      <h2 className="mt-1 text-lg font-bold uppercase tracking-wider text-foreground">
+        Join the lattice
+      </h2>
 
-      <label className="mt-4 block text-[11px] uppercase tracking-widest text-muted-foreground">X handle</label>
+      <label className="mt-4 block text-[11px] uppercase tracking-widest text-muted-foreground">
+        X handle
+      </label>
       <div className="mt-1 flex items-center rounded-sm border border-border bg-background/70 focus-within:border-[var(--ritual-green)]">
         <span className="px-3 text-muted-foreground">@</span>
         <input
@@ -788,7 +963,9 @@ function JoinCard({
         )}
       </div>
 
-      <label className="mt-4 block text-[11px] uppercase tracking-widest text-muted-foreground">Country</label>
+      <label className="mt-4 block text-[11px] uppercase tracking-widest text-muted-foreground">
+        Country
+      </label>
       <CountryCombobox region={region} setRegion={setRegion} />
 
       <button
@@ -799,7 +976,10 @@ function JoinCard({
         {busy ? "…signing…" : account ? "Sign & Join" : "Connect & Join"}
       </button>
       {!account && (
-        <button onClick={onConnect} className="mt-2 w-full text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground">
+        <button
+          onClick={onConnect}
+          className="mt-2 w-full text-[11px] uppercase tracking-widest text-muted-foreground hover:text-foreground"
+        >
           or connect wallet first
         </button>
       )}
@@ -809,7 +989,15 @@ function JoinCard({
         </div>
       )}
       <div className="mt-3 text-[10px] uppercase tracking-widest text-muted-foreground/70">
-        Need RITUAL? <a href="https://faucet.ritualfoundation.org" target="_blank" rel="noreferrer" className="text-[var(--ritual-green-bright)] underline-offset-2 hover:underline">faucet ↗</a>
+        Need RITUAL?{" "}
+        <a
+          href="https://faucet.ritualfoundation.org"
+          target="_blank"
+          rel="noreferrer"
+          className="text-[var(--ritual-green-bright)] underline-offset-2 hover:underline"
+        >
+          faucet ↗
+        </a>
       </div>
     </section>
   );
@@ -836,8 +1024,12 @@ function RegionList({
     <section className="rounded-sm border border-border bg-card/60 p-5">
       <div className="flex items-baseline justify-between">
         <div>
-          <div className="text-[11px] uppercase tracking-[0.3em] text-[var(--ritual-green-bright)]">// regions</div>
-          <h2 className="mt-1 text-lg font-bold uppercase tracking-wider text-foreground">Distribution</h2>
+          <div className="text-[11px] uppercase tracking-[0.3em] text-[var(--ritual-green-bright)]">
+            // regions
+          </div>
+          <h2 className="mt-1 text-lg font-bold uppercase tracking-wider text-foreground">
+            Distribution
+          </h2>
         </div>
         <div className="text-right">
           <div className="text-2xl font-black tabular-nums text-foreground">{total}</div>
@@ -859,11 +1051,15 @@ function RegionList({
                 <button
                   onClick={() => setRegion(code)}
                   className={`group block w-full rounded-sm border px-3 py-2 text-left transition-colors ${
-                    isActive ? "border-[var(--ritual-green)] bg-[color-mix(in_oklab,var(--ritual-green)_12%,transparent)]" : "border-transparent hover:border-border"
+                    isActive
+                      ? "border-[var(--ritual-green)] bg-[color-mix(in_oklab,var(--ritual-green)_12%,transparent)]"
+                      : "border-transparent hover:border-border"
                   }`}
                 >
                   <div className="flex items-center justify-between text-xs">
-                    <span className={`flex items-center gap-2 uppercase tracking-wider ${isActive ? "text-foreground" : "text-muted-foreground group-hover:text-foreground"}`}>
+                    <span
+                      className={`flex items-center gap-2 uppercase tracking-wider ${isActive ? "text-foreground" : "text-muted-foreground group-hover:text-foreground"}`}
+                    >
                       <span className="text-base">{country.flag}</span>
                       {country.name}
                     </span>
@@ -885,7 +1081,15 @@ function RegionList({
   );
 }
 
-function Marquee({ count, loading, members }: { count: number; loading: boolean; members: Member[] }) {
+function Marquee({
+  count,
+  loading,
+  members,
+}: {
+  count: number;
+  loading: boolean;
+  members: Member[];
+}) {
   const items = members.length
     ? members.slice(-12).map((m) => `@${m.handle}`)
     : ["awaiting initiates", "the lattice listens", "chain 1979", "ritual.foundation"];
@@ -901,7 +1105,9 @@ function Marquee({ count, loading, members }: { count: number; loading: boolean;
         ))}
       </div>
       {loading && (
-        <div className="mt-2 px-4 text-[10px] uppercase tracking-widest text-muted-foreground">…syncing chain {count > 0 ? `· ${count} loaded` : ""}</div>
+        <div className="mt-2 px-4 text-[10px] uppercase tracking-widest text-muted-foreground">
+          …syncing chain {count > 0 ? `· ${count} loaded` : ""}
+        </div>
       )}
     </div>
   );
@@ -910,18 +1116,36 @@ function Marquee({ count, loading, members }: { count: number; loading: boolean;
 function Footer() {
   return (
     <footer className="border-t border-border py-8 text-center text-[11px] uppercase tracking-[0.3em] text-muted-foreground">
-      built on <a href="https://ritualfoundation.org" target="_blank" rel="noreferrer" className="text-[var(--ritual-green-bright)] hover:underline">ritual</a> · chain 1979 · testnet
+      built on{" "}
+      <a
+        href="https://ritualfoundation.org"
+        target="_blank"
+        rel="noreferrer"
+        className="text-[var(--ritual-green-bright)] hover:underline"
+      >
+        ritual
+      </a>{" "}
+      · chain 1979 · testnet
     </footer>
   );
 }
 
-function ShareCardModal({ info, onClose }: { info: SuccessInfo; onClose: () => void }) {
+function ShareCardModal({
+  info,
+  regionTotal,
+  onClose,
+}: {
+  info: SuccessInfo;
+  regionTotal: number;
+  onClose: () => void;
+}) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [downloading, setDownloading] = useState(false);
   const country = getCountry(info.region);
+  const displayTotal = Math.max(regionTotal, info.total);
   const shareText = `I just joined the @ritualnet community map.
 
-${country?.flag ?? ""} ${country?.name ?? info.region} · #${info.rank} of ${info.total}
+${country?.flag ?? ""} ${country?.name ?? info.region} · #${info.rank} of ${displayTotal}
 @${info.handle} pinned to the lattice ⛧
 
 ritual-community-map.lovable.app`;
@@ -952,7 +1176,10 @@ ritual-community-map.lovable.app`;
   }
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
       <div className="relative w-full max-w-md" onClick={(e) => e.stopPropagation()}>
         <button
           onClick={onClose}
@@ -1003,7 +1230,9 @@ ritual-community-map.lovable.app`;
                   alt={info.handle}
                   crossOrigin="anonymous"
                   className="relative h-20 w-20 rounded-sm border border-border object-cover"
-                  onError={(e) => ((e.target as HTMLImageElement).src = "https://unavatar.io/fallback.png")}
+                  onError={(e) =>
+                    ((e.target as HTMLImageElement).src = "https://unavatar.io/fallback.png")
+                  }
                 />
               </div>
               <div className="min-w-0">
@@ -1018,15 +1247,21 @@ ritual-community-map.lovable.app`;
 
             <div className="mt-6 grid grid-cols-2 gap-3">
               <div className="rounded-sm border border-[color-mix(in_oklab,var(--ritual-green)_45%,transparent)] bg-white/5 p-3">
-                <div className="text-[9px] uppercase tracking-[0.3em] text-white/60">// my rank</div>
+                <div className="text-[9px] uppercase tracking-[0.3em] text-white/60">
+                  // my rank
+                </div>
                 <div className="mt-1 text-3xl font-black tabular-nums text-[var(--ritual-green-bright)]">
                   #{info.rank}
                 </div>
-                <div className="text-[10px] uppercase tracking-widest text-white/60">in {country?.code.toUpperCase() ?? info.region}</div>
+                <div className="text-[10px] uppercase tracking-widest text-white/60">
+                  in {country?.code.toUpperCase() ?? info.region}
+                </div>
               </div>
               <div className="rounded-sm border border-[color-mix(in_oklab,var(--ritual-green)_45%,transparent)] bg-white/5 p-3">
-                <div className="text-[9px] uppercase tracking-[0.3em] text-white/60">// region total</div>
-                <div className="mt-1 text-3xl font-black tabular-nums">{info.total}</div>
+                <div className="text-[9px] uppercase tracking-[0.3em] text-white/60">
+                  // region total
+                </div>
+                <div className="mt-1 text-3xl font-black tabular-nums">{displayTotal}</div>
                 <div className="text-[10px] uppercase tracking-widest text-white/60">initiates</div>
               </div>
             </div>

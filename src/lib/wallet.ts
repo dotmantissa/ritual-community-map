@@ -5,16 +5,15 @@ export const ritualChain = defineChain({
   name: "Ritual",
   nativeCurrency: { name: "Ritual", symbol: "RITUAL", decimals: 18 },
   rpcUrls: { default: { http: ["https://rpc.ritualfoundation.org"] } },
-  blockExplorers: {
-    default: { name: "Ritual Explorer", url: "https://explorer.ritualfoundation.org" },
-  },
 });
 
 export const publicClient = createPublicClient({ chain: ritualChain, transport: http() });
 
 declare global {
   interface Window {
-    ethereum?: any;
+    ethereum?: {
+      request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+    };
   }
 }
 
@@ -26,7 +25,7 @@ export function getInjected() {
 export async function connectWallet(): Promise<`0x${string}`> {
   const eth = getInjected();
   if (!eth) throw new Error("No wallet detected. Install MetaMask.");
-  const accounts: string[] = await eth.request({ method: "eth_requestAccounts" });
+  const accounts = (await eth.request({ method: "eth_requestAccounts" })) as string[];
   await ensureChain();
   return accounts[0] as `0x${string}`;
 }
@@ -37,8 +36,9 @@ export async function ensureChain() {
   const hex = "0x" + (1979).toString(16);
   try {
     await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hex }] });
-  } catch (e: any) {
-    if (e?.code === 4902 || /Unrecognized chain/i.test(e?.message ?? "")) {
+  } catch (error: unknown) {
+    const chainError = error as { code?: number; message?: string };
+    if (chainError?.code === 4902 || /Unrecognized chain/i.test(chainError?.message ?? "")) {
       await eth.request({
         method: "wallet_addEthereumChain",
         params: [
@@ -52,7 +52,7 @@ export async function ensureChain() {
         ],
       });
     } else {
-      throw e;
+      throw error;
     }
   }
 }
