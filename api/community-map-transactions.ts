@@ -1,8 +1,12 @@
-const RITUAL_MAP_ADDRESS = "0x61c4ab75fc3304a0c506a54596dfcdf18688d624";
+const DEFAULT_RITUAL_MAP_ADDRESS = "0x84725642453c2dcde42d075b5f3ab96b5922a44b";
+const RITUAL_MAP_ADDRESS =
+  process.env.VITE_RITUAL_MAP_CONTRACT_ADDRESS ??
+  process.env.RITUAL_MAP_CONTRACT_ADDRESS ??
+  DEFAULT_RITUAL_MAP_ADDRESS;
 const INDEXER_TRANSACTIONS_URL = `https://explorer.ritualfoundation.org/api/indexer-proxy/api/v1/addresses/${RITUAL_MAP_ADDRESS}/transactions`;
-const INDEXER_TRANSACTION_URL = "https://explorer.ritualfoundation.org/api/indexer-proxy/api/v1/transactions";
+const INDEXER_TRANSACTION_URL =
+  "https://explorer.ritualfoundation.org/api/indexer-proxy/api/v1/transactions";
 const JOIN_SELECTOR = "0x29803b21";
-
 type IndexedTransaction = {
   tx_hash: string;
   method_selector: string;
@@ -38,18 +42,14 @@ export default async function handler(request: VercelRequestLike, response: Verc
     limit: readParam(request, "limit") ?? "1000",
     offset: readParam(request, "offset") ?? "0",
     from_date: readParam(request, "from_date") ?? "2026-05-01",
-    to_date:
-      readParam(request, "to_date") ?? readParam(request, "from_date") ?? "2026-05-01",
+    to_date: readParam(request, "to_date") ?? readParam(request, "from_date") ?? "2026-05-01",
   });
 
   const upstream = await fetch(`${INDEXER_TRANSACTIONS_URL}?${params}`);
   const upstreamText = await upstream.text();
 
   response.setHeader("cache-control", "no-store");
-  response.setHeader(
-    "content-type",
-    upstream.headers.get("content-type") ?? "application/json",
-  );
+  response.setHeader("content-type", upstream.headers.get("content-type") ?? "application/json");
 
   if (!upstream.ok) {
     response.status(upstream.status).send(upstreamText);
@@ -61,7 +61,10 @@ export default async function handler(request: VercelRequestLike, response: Verc
 
   data.transactions = await Promise.all(
     transactions.map(async (transaction) => {
-      if (transaction.method_selector !== JOIN_SELECTOR || typeof transaction.input_data === "string") {
+      if (
+        transaction.method_selector !== JOIN_SELECTOR ||
+        typeof transaction.input_data === "string"
+      ) {
         return transaction;
       }
 

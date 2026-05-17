@@ -1,7 +1,10 @@
-export const RITUAL_MAP_ADDRESS = "0x61c4ab75fc3304a0c506a54596dfcdf18688d624" as const;
+export const DEFAULT_RITUAL_MAP_ADDRESS = "0x84725642453c2dcde42d075b5f3ab96b5922a44b" as const;
 
-// Block the contract was deployed at; used as fromBlock for log queries.
-export const RITUAL_MAP_DEPLOY_BLOCK = 19779048n;
+export const RITUAL_MAP_ADDRESS = (import.meta.env.VITE_RITUAL_MAP_CONTRACT_ADDRESS ??
+  DEFAULT_RITUAL_MAP_ADDRESS) as `0x${string}`;
+
+// Safe lower-bound block for log queries on the deployed contract.
+export const RITUAL_MAP_DEPLOY_BLOCK = 19603000n;
 
 export const RITUAL_MAP_ABI = [
   {
@@ -16,13 +19,48 @@ export const RITUAL_MAP_ABI = [
     type: "event",
   },
   {
-    inputs: [{ name: "handle", type: "string" }, { name: "region", type: "string" }],
+    inputs: [
+      { name: "handle", type: "string" },
+      { name: "region", type: "string" },
+    ],
     name: "join",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function",
   },
-  { inputs: [], name: "count", outputs: [{ type: "uint256" }], stateMutability: "view", type: "function" },
+  {
+    inputs: [],
+    name: "count",
+    outputs: [{ type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [],
+    name: "getAll",
+    outputs: [
+      { type: "address[]" },
+      { type: "string[]" },
+      { type: "string[]" },
+      { type: "uint256[]" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [{ type: "address" }],
+    name: "members",
+    outputs: [{ type: "string" }, { type: "string" }, { type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [{ type: "uint256" }],
+    name: "memberList",
+    outputs: [{ type: "address" }],
+    stateMutability: "view",
+    type: "function",
+  },
   {
     inputs: [{ type: "address" }],
     name: "joined",

@@ -97,6 +97,32 @@ async function getJoinedCount(): Promise<number> {
   return Number(count);
 }
 
+async function fetchMembersFromContract(): Promise<Member[]> {
+  const [addresses, handles, regions, timestamps] = await publicClient.readContract({
+    address: RITUAL_MAP_ADDRESS,
+    abi: RITUAL_MAP_ABI,
+    functionName: "getAll",
+  });
+
+  const length = Math.min(
+    addresses.length,
+    handles.length,
+    regions.length,
+    timestamps.length,
+  );
+  const members: Member[] = [];
+  for (let index = 0; index < length; index++) {
+    members.push({
+      address: addresses[index] as `0x${string}`,
+      handle: handles[index],
+      region: regions[index],
+      timestamp: Number(timestamps[index]),
+    });
+  }
+
+  return dedupeMembersByAddress(members);
+}
+
 function dedupeMembersByAddress(members: Member[]): Member[] {
   const seen = new Set<string>();
   const list: Member[] = [];
@@ -178,6 +204,14 @@ async function fetchMembersFromIndexer(): Promise<Member[]> {
 
 async function fetchAllMembers(): Promise<Member[]> {
   const expectedCount = await getJoinedCount();
+  let contractMembers: Member[] = [];
+  try {
+    contractMembers = await fetchMembersFromContract();
+  } catch (error) {
+    console.error(error);
+  }
+  if (contractMembers.length >= expectedCount) return contractMembers;
+
   let eventMembers: Member[] = [];
   try {
     eventMembers = await fetchMembersFromEvents();
@@ -192,9 +226,13 @@ async function fetchAllMembers(): Promise<Member[]> {
   } catch (error) {
     console.error(error);
   }
-  const bestMembers = indexerMembers.length > eventMembers.length ? indexerMembers : eventMembers;
-  if (bestMembers.length < expectedCount) throw new Error("Could not fetch every registered user");
-  return bestMembers;
+  const combinedMembers = dedupeMembersByAddress([
+    ...contractMembers,
+    ...eventMembers,
+    ...indexerMembers,
+  ]);
+  if (combinedMembers.length >= expectedCount) return combinedMembers;
+  throw new Error("Could not fetch every registered user");
 }
 
 export function CommunityMap() {
