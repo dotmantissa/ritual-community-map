@@ -7,6 +7,9 @@ import { COUNTRIES, getCountry } from "@/lib/countries";
 import logo from "@/assets/ritual-logo.png";
 
 const GEO_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
+const JOIN_SELECTOR = "0x29803b21";
+const LOG_BLOCK_RANGE = 99_999n;
+const INDEXER_TRANSACTIONS_URL = "/api/community-map-transactions";
 
 export type Member = {
   address: `0x${string}`;
@@ -21,6 +24,17 @@ type SuccessInfo = {
   rank: number;
   total: number;
   address: `0x${string}`;
+};
+
+type IndexedTransaction = {
+  tx_hash: string;
+  block_number: number;
+  block_timestamp: number;
+  from_address: string;
+  status: number;
+  tx_index: number;
+  method_selector: string;
+  input_data?: string;
 };
 
 function regionCoords(id: string): [number, number] {
@@ -38,8 +52,155 @@ function avatarUrl(handle: string) {
   return `https://unavatar.io/x/${encodeURIComponent(clean)}`;
 }
 
+function normalizeHandle(handle: string) {
+  return handle.replace(/^@+/, "").trim().toLowerCase();
+}
+
+function decodeAbiString(args: string, index: number): string {
+  const readWord = (offset: number) => BigInt(`0x${args.slice(2 + offset * 2, 2 + (offset + 32) * 2)}`);
+  const offset = Number(readWord(index * 32));
+  const length = Number(readWord(offset));
+  const hex = args.slice(2 + (offset + 32) * 2, 2 + (offset + 32 + length) * 2);
+  const bytes = hex.match(/.{2}/g)?.map((byte) => parseInt(byte, 16)) ?? [];
+  return new TextDecoder().decode(new Uint8Array(bytes));
+}
+
+function decodeJoinInput(input: string): { handle: string; region: string } | null {
+  if (!input.startsWith(JOIN_SELECTOR)) return null;
+  try {
+    const args = `0x${input.slice(10)}`;
+    return {
+      handle: decodeAbiString(args, 0),
+      region: decodeAbiString(args, 1),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function dateString(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
+}
+
+async function getJoinedCount(): Promise<number> {
+  const count = await publicClient.readContract({
+    address: RITUAL_MAP_ADDRESS,
+    abi: RITUAL_MAP_ABI,
+    functionName: "count",
+  });
+  return Number(count);
+}
+
+function dedupeMembersByAddress(members: Member[]): Member[] {
+  const seen = new Set<string>();
+  const list: Member[] = [];
+  for (const member of members) {
+    const key = member.address.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    list.push(member);
+  }
+  return list;
+}
+
+async function fetchMembersFromEvents(): Promise<Member[]> {
+  const latest = await publicClient.getBlockNumber();
+  const members: Member[] = [];
+  for (let fromBlock = RITUAL_MAP_DEPLOY_BLOCK; fromBlock <= latest; fromBlock += LOG_BLOCK_RANGE + 1n) {
+    const toBlock = fromBlock + LOG_BLOCK_RANGE > latest ? latest : fromBlock + LOG_BLOCK_RANGE;
+    const chunk = await publicClient.getContractEvents({
+      address: RITUAL_MAP_ADDRESS,
+      abi: RITUAL_MAP_ABI,
+      eventName: "Joined",
+      fromBlock,
+      toBlock,
+    });
+    members.push(
+      ...chunk.map((log) => ({
+        address: log.args.user as `0x${string}`,
+        handle: log.args.handle as string,
+        region: log.args.region as string,
+        timestamp: Number(log.args.timestamp as bigint),
+      })),
+    );
+  }
+
+  return dedupeMembersByAddress(members);
+}
+
+async function fetchMembersFromIndexer(): Promise<Member[]> {
+  const firstDate = new Date("2026-05-01T00:00:00.000Z");
+  const lastDate = addDays(new Date(), 1);
+  const limit = 1000;
+  const transactions: IndexedTransaction[] = [];
+
+  for (let fromDate = firstDate; fromDate <= lastDate; fromDate = addDays(fromDate, 30)) {
+    const windowEnd = addDays(fromDate, 29);
+    const toDate = windowEnd > lastDate ? lastDate : windowEnd;
+    for (let offset = 0; ; offset += limit) {
+      const params = new URLSearchParams({
+        limit: String(limit),
+        offset: String(offset),
+        from_date: dateString(fromDate),
+        to_date: dateString(toDate),
+      });
+      const response = await fetch(`${INDEXER_TRANSACTIONS_URL}?${params}`);
+      if (!response.ok) throw new Error("Indexer fetch failed");
+      const data = await response.json();
+      const page: IndexedTransaction[] = Array.isArray(data.transactions) ? data.transactions : [];
+      transactions.push(...page);
+      if (!data.hasMore || page.length === 0) break;
+    }
+  }
+  const members = transactions
+    .filter((tx): tx is IndexedTransaction & { input_data: string } => tx.status === 1 && tx.method_selector === JOIN_SELECTOR && typeof tx.input_data === "string")
+    .sort((a, b) => a.block_number - b.block_number || a.tx_index - b.tx_index)
+    .flatMap((tx) => {
+      const decoded = decodeJoinInput(tx.input_data);
+      if (!decoded) return [];
+      return [
+        {
+          address: tx.from_address as `0x${string}`,
+          handle: decoded.handle,
+          region: decoded.region,
+          timestamp: Math.floor(Number(tx.block_timestamp) / 1000),
+        },
+      ];
+    });
+  return dedupeMembersByAddress(members);
+}
+
+async function fetchAllMembers(): Promise<Member[]> {
+  const expectedCount = await getJoinedCount();
+  let eventMembers: Member[] = [];
+  try {
+    eventMembers = await fetchMembersFromEvents();
+  } catch (error) {
+    console.error(error);
+  }
+  if (eventMembers.length >= expectedCount) return eventMembers;
+
+  let indexerMembers: Member[] = [];
+  try {
+    indexerMembers = await fetchMembersFromIndexer();
+  } catch (error) {
+    console.error(error);
+  }
+  const bestMembers = indexerMembers.length > eventMembers.length ? indexerMembers : eventMembers;
+  if (bestMembers.length < expectedCount) throw new Error("Could not fetch every registered user");
+  return bestMembers;
+}
+
 export function CommunityMap() {
   const [members, setMembers] = useState<Member[]>([]);
+  const membersRef = useRef<Member[]>([]);
+  const refreshPromiseRef = useRef<Promise<Member[]> | null>(null);
   const [loading, setLoading] = useState(true);
   const [account, setAccount] = useState<`0x${string}` | null>(null);
   const [handle, setHandle] = useState("");
@@ -91,38 +252,27 @@ export function CommunityMap() {
     detect();
   }, []);
 
-  async function refresh(): Promise<Member[]> {
-    try {
-      const logs = await publicClient.getContractEvents({
-        address: RITUAL_MAP_ADDRESS,
-        abi: RITUAL_MAP_ABI,
-        eventName: "Joined",
-        fromBlock: RITUAL_MAP_DEPLOY_BLOCK,
-        toBlock: "latest",
-      });
-      // Dedup by address (first join wins) to mirror on-chain `joined` mapping
-      const seen = new Set<string>();
-      const list: Member[] = [];
-      for (const log of logs) {
-        const a = (log.args as any).user as `0x${string}`;
-        const key = a.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        list.push({
-          address: a,
-          handle: (log.args as any).handle as string,
-          region: (log.args as any).region as string,
-          timestamp: Number((log.args as any).timestamp as bigint),
-        });
+  async function refresh(force = false): Promise<Member[]> {
+    if (!force && refreshPromiseRef.current) return refreshPromiseRef.current;
+
+    refreshPromiseRef.current = (async () => {
+      try {
+        const list = await fetchAllMembers();
+        const current = membersRef.current;
+        const next = list.length >= current.length ? list : current;
+        membersRef.current = next;
+        setMembers(next);
+        return next;
+      } catch (e) {
+        console.error(e);
+        return membersRef.current;
+      } finally {
+        setLoading(false);
+        refreshPromiseRef.current = null;
       }
-      setMembers(list);
-      return list;
-    } catch (e) {
-      console.error(e);
-      return [];
-    } finally {
-      setLoading(false);
-    }
+    })();
+
+    return refreshPromiseRef.current;
   }
 
   useEffect(() => {
@@ -159,7 +309,8 @@ export function CommunityMap() {
 
   async function onJoin() {
     setStatus("");
-    if (!handle.trim()) return setStatus("Enter your X handle");
+    const cleanHandle = handle.replace(/^@+/, "").trim();
+    if (!cleanHandle) return setStatus("Enter your X handle");
     if (!getCountry(region)) return setStatus("Select a country");
     let acct = account;
     if (!acct) {
@@ -172,6 +323,17 @@ export function CommunityMap() {
     }
     setBusy(true);
     try {
+      const list = await refresh();
+      const expectedCount = await getJoinedCount();
+      if (list.length < expectedCount) {
+        setStatus("Syncing every registered user. Try again in a moment.");
+        return;
+      }
+      const existingHandle = list.find((m) => normalizeHandle(m.handle) === normalizeHandle(cleanHandle));
+      if (existingHandle && existingHandle.address.toLowerCase() !== acct!.toLowerCase()) {
+        setStatus(`@${cleanHandle} is already on the map with another wallet`);
+        return;
+      }
       await ensureChain();
       const w = getWalletClient(acct!);
       setStatus("Awaiting signature…");
@@ -180,20 +342,35 @@ export function CommunityMap() {
         address: RITUAL_MAP_ADDRESS,
         abi: RITUAL_MAP_ABI,
         functionName: "join",
-        args: [handle.replace(/^@/, "").trim(), region],
+        args: [cleanHandle, region],
         maxFeePerGas: 1_000_000_000n, // 1 gwei cap
         maxPriorityFeePerGas: 1n, // ~0 tip
       });
       setStatus("Transmitting → " + hash.slice(0, 10) + "…");
-      await publicClient.waitForTransactionReceipt({ hash });
-      const list = await refresh();
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") throw new Error("Transaction reverted");
+      const syncedList = await refresh(true);
+      let nextList = syncedList;
+      if (!syncedList.some((m) => m.address.toLowerCase() === acct!.toLowerCase())) {
+        nextList = dedupeMembersByAddress([
+          ...syncedList,
+          {
+            address: acct!,
+            handle: cleanHandle,
+            region,
+            timestamp: Math.floor(Date.now() / 1000),
+          },
+        ]);
+        membersRef.current = nextList;
+        setMembers(nextList);
+      }
       // Find this user's record (latest entry matching address)
-      const mine = [...list].reverse().find((m) => m.address.toLowerCase() === acct!.toLowerCase());
-      const inRegion = list.filter((m) => m.region === region);
+      const mine = [...nextList].reverse().find((m) => m.address.toLowerCase() === acct!.toLowerCase());
+      const inRegion = nextList.filter((m) => m.region === region);
       const rank = mine ? inRegion.findIndex((m) => m.address.toLowerCase() === mine.address.toLowerCase()) + 1 : inRegion.length;
       const total = inRegion.length;
       setSuccess({
-        handle: handle.replace(/^@/, "").trim(),
+        handle: cleanHandle,
         region,
         rank: Math.max(rank, 1),
         total: Math.max(total, 1),
