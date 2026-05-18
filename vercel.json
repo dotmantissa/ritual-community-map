@@ -1,4 +1,5 @@
 {
+  "installCommand": "npm install --legacy-peer-deps",
   "buildCommand": "npx vite build --config vite.vercel.config.ts",
   "outputDirectory": "dist/client",
   "rewrites": [

@@ -781,7 +781,7 @@ export default async function handler(request: VercelRequestLike, response: Verc
       return;
     }
 
-    const snapshot = forceFresh ? { data: null, etag: null } : await readStore();
+    const snapshot = await readStore();
     const store =
       snapshot.data && snapshot.data.members.length > 0
         ? normalizeStoreData(snapshot.data)
