@@ -247,24 +247,10 @@ async function fetchMembersFromEvents(): Promise<Member[]> {
   return normalizeMembers(members);
 }
 
-async function fetchMembersFromIndexer(force = false): Promise<Member[]> {
-  const params = new URLSearchParams({
-    all: "1",
-    members: "1",
-    limit: "1000",
-    from_date: "2026-05-01",
-    to_date: dateString(addDays(new Date(), 1)),
-  });
-  if (force) {
-    params.set("fresh", "1");
-    params.set("t", String(Date.now()));
-  }
-
-  const response = await fetch(`${INDEXER_TRANSACTIONS_URL}?${params}`, {
-    cache: force ? "no-store" : "default",
-  });
-  if (!response.ok) throw new Error("Indexer fetch failed");
-  const data = await response.json();
+function membersFromApiPayload(data: {
+  members?: ApiMember[];
+  transactions?: IndexedTransaction[];
+}): Member[] {
   if (Array.isArray(data.members) && data.members.length > 0) {
     return normalizeMembers(
       data.members.map((member: ApiMember) => ({
@@ -285,39 +271,41 @@ async function fetchMembersFromIndexer(force = false): Promise<Member[]> {
   return membersFromTransactions(transactions);
 }
 
+async function fetchMembersFromIndexer(force = false): Promise<Member[]> {
+  const params = new URLSearchParams({
+    all: "1",
+    members: "1",
+    limit: "1000",
+    from_date: "2026-05-01",
+    to_date: dateString(addDays(new Date(), 1)),
+  });
+  if (force) {
+    params.set("fresh", "1");
+    params.set("t", String(Date.now()));
+  }
+
+  const response = await fetch(`${INDEXER_TRANSACTIONS_URL}?${params}`, {
+    cache: force ? "no-store" : "default",
+  });
+  if (!response.ok) throw new Error("Community map server fetch failed");
+  const data = await response.json();
+  return membersFromApiPayload(data);
+}
+
+async function syncConfirmedJoin(hash: `0x${string}`, address: `0x${string}`): Promise<Member[]> {
+  const response = await fetch(INDEXER_TRANSACTIONS_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ txHash: hash, address }),
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error("Community map server update failed");
+  const data = await response.json();
+  return membersFromApiPayload(data);
+}
+
 async function fetchAllMembers(force = false): Promise<Member[]> {
-  let indexerMembers: Member[] = [];
-  try {
-    indexerMembers = await fetchMembersFromIndexer(force);
-    if (indexerMembers.length > 0) return indexerMembers;
-  } catch (error) {
-    console.error(error);
-  }
-
-  const expectedCount = await getJoinedCount();
-  let contractMembers: Member[] = [];
-  try {
-    contractMembers = await fetchMembersFromContract();
-  } catch (error) {
-    console.error(error);
-  }
-  if (contractMembers.length >= expectedCount) return normalizeMembers(contractMembers);
-
-  let eventMembers: Member[] = [];
-  try {
-    eventMembers = await fetchMembersFromEvents();
-  } catch (error) {
-    console.error(error);
-  }
-  if (eventMembers.length >= expectedCount) return normalizeMembers(eventMembers);
-
-  const combinedMembers = normalizeMembers([
-    ...indexerMembers,
-    ...contractMembers,
-    ...eventMembers,
-  ]);
-  if (combinedMembers.length > 0) return combinedMembers;
-  throw new Error("Could not fetch every registered user");
+  return fetchMembersFromIndexer(force);
 }
 
 export function CommunityMap() {
@@ -419,22 +407,8 @@ export function CommunityMap() {
 
   useEffect(() => {
     refresh();
-    let unwatch: (() => void) | undefined;
-    try {
-      unwatch = publicClient.watchContractEvent({
-        address: RITUAL_MAP_ADDRESS,
-        abi: RITUAL_MAP_ABI,
-        eventName: "Joined",
-        onLogs: () => refresh(true),
-        poll: true,
-        pollingInterval: 4000,
-      });
-    } catch (error) {
-      console.error(error);
-    }
-    const i = setInterval(refresh, 8000);
+    const i = setInterval(() => void refresh(), 3000);
     return () => {
-      unwatch?.();
       clearInterval(i);
     };
   }, []);
@@ -471,11 +445,6 @@ export function CommunityMap() {
     setBusy(true);
     try {
       const list = await refresh();
-      const expectedCount = await getJoinedCount();
-      if (list.length < expectedCount) {
-        setStatus("Syncing every registered user. Try again in a moment.");
-        return;
-      }
       const existingHandle = list.find(
         (m) => normalizeHandle(m.handle) === normalizeHandle(cleanHandle),
       );
@@ -506,7 +475,17 @@ export function CommunityMap() {
         blockNumber: Number(receipt.blockNumber),
         transactionIndex: Number(receipt.transactionIndex),
       };
-      const nextList = mergeMemberLists(membersRef.current, [confirmedMember]);
+      setStatus("Confirmed. Updating the community map…");
+      let syncedMembers: Member[] = [];
+      try {
+        syncedMembers = await syncConfirmedJoin(hash, acct!);
+      } catch (error) {
+        console.error(error);
+      }
+      const nextList =
+        syncedMembers.length > 0
+          ? mergeMemberLists(membersRef.current, syncedMembers)
+          : mergeMemberLists(membersRef.current, [confirmedMember]);
       membersRef.current = nextList;
       setMembers(nextList);
       const mine =
